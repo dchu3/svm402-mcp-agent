@@ -131,26 +131,6 @@ def test_truncate_description_at_word_boundary():
     assert result in ["This is a test description...", "This is a test..."]
 
 
-    assert manager.trader is not None
-    assert manager.trader.name == "trader"
-
-
-    assert manager.trader is not None
-    assert manager.trader._extra_env == trader_env
-
-
-    assert manager.trader is None
-
-
-    client = manager.get_client("trader")
-    assert client is not None
-    assert client.name == "trader"
-
-
-    client = manager.get_client("trader")
-    assert client is None
-
-
 # ---------------------------------------------------------------------------
 # get_gemini_functions_for — filtered tool getter
 # ---------------------------------------------------------------------------
@@ -184,13 +164,6 @@ def _manager_with_tools() -> MCPManager:
             "inputSchema": {"type": "object", "properties": {"token_address": {"type": "string"}}, "required": ["token_address"]},
         }
     ]
-    manager.trader._tools = [
-        {
-            "name": "execute_trade",
-            "description": "Execute trade",
-            "inputSchema": {"type": "object", "properties": {}, "required": []},
-        }
-    ]
     return manager
 
 
@@ -201,7 +174,7 @@ def test_get_gemini_functions_for_returns_only_requested_clients():
     names = [f.name for f in functions]
     assert "dexscreener_search_pairs" in names
     assert "rugcheck_get_token_summary" in names
-# dexpaprika must be excluded
+    # dexpaprika must be excluded
     assert not any("dexpaprika" in n for n in names)
 
 
@@ -438,7 +411,6 @@ async def test_mcp_client_start_passes_merged_extra_env():
     assert "env" in kwargs
     assert kwargs["env"] is not None
     assert kwargs["env"]["SOLANA_RPC_URL"] == "https://rpc.example"
-
 
 
 def test_mcp_manager_clients_retry_on_timeout_enabled():

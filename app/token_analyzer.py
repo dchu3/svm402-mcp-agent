@@ -715,35 +715,6 @@ class TokenAnalyzer:
             self._log("error", f"Structured AI analysis failed: {e}")
             return default_analysis, default_verdict
 
-    async def _generate_ai_analysis(self, token_data: TokenData) -> str:
-        """Generate AI analysis of the token data."""
-        # Build context for AI
-        context = self._build_analysis_context(token_data)
-        
-        try:
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=self.model_name,
-                contents=context,
-                config=types.GenerateContentConfig(
-                    system_instruction=ANALYSIS_SYSTEM_PROMPT,
-                ),
-            )
-            
-            # Safely extract text from response
-            if response and response.candidates:
-                candidate = response.candidates[0]
-                if candidate and candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, "text") and part.text:
-                            return part.text.strip()
-            
-            return "Unable to generate AI analysis."
-            
-        except Exception as e:
-            self._log("error", f"AI analysis failed: {str(e)}")
-            return f"AI analysis unavailable: {str(e)}"
-
     def _build_analysis_context(self, token_data: TokenData) -> str:
         """Build context string for AI analysis."""
         lines = [
@@ -815,35 +786,6 @@ class TokenAnalyzer:
                 lines.append(f"- {err}")
         
         return "\n".join(lines)
-
-
-    async def _generate_tweet_verdict(self, token_data: TokenData) -> str:
-        """Generate a single-sentence AI verdict for the tweet summary."""
-        context = self._build_analysis_context(token_data)
-        
-        try:
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=self.model_name,
-                contents=context,
-                config=types.GenerateContentConfig(
-                    system_instruction=TWEET_ANALYSIS_SYSTEM_PROMPT,
-                ),
-            )
-            
-            if response and response.candidates:
-                candidate = response.candidates[0]
-                if candidate and candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        if hasattr(part, "text") and part.text:
-                            return part.text.strip()
-            
-            return "Unable to generate verdict."
-            
-        except Exception as e:
-            self._log("error", f"Tweet verdict generation failed: {str(e)}")
-            return "Verdict unavailable."
-
 
 
     @staticmethod
