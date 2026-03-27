@@ -134,7 +134,6 @@ async def test_analyze_happy_path_returns_structured_response(monkeypatch):
                 name="Bonk",
                 safety_status="Safe",
             ),
-            ai_analysis="Looks healthy.",
             generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             structured=structured,
         )
@@ -182,7 +181,6 @@ async def test_analyze_with_holder_snapshot(monkeypatch):
     mock_analyzer.analyze = AsyncMock(
         return_value=AnalysisReport(
             token_data=TokenData(address=_VALID_SOLANA_ADDR, chain="solana", safety_status="Safe"),
-            ai_analysis="Report.",
             generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             structured=structured,
         )

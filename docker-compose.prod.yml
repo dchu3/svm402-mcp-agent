@@ -11,9 +11,16 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     environment:
-      - DOMAIN=${DOMAIN:-localhost}
+      - DOMAIN=${DOMAIN:?DOMAIN environment variable is required}
     depends_on:
-      - analysis-server
+      analysis-server:
+        condition: service_healthy
+    networks:
+      - x402-net
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
 
   api-service:
     build: .
@@ -26,8 +33,20 @@ services:
       MCP_RUGCHECK_CMD: node /opt/mcp/dex-rugcheck-mcp/dist/index.js
       MCP_SOLANA_RPC_CMD: node /opt/mcp/solana-rpc-mcp/dist/index.js
     command: ["--http-api"]
-    # Not exposing ports externally; Caddy proxies to the analysis-server,
-    # which then calls this API internally.
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - x402-net
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2
 
   analysis-server:
     build:
@@ -39,10 +58,30 @@ services:
       PYTHON_API_URL: http://api-service:8080
       SERVER_PORT: 4022
     depends_on:
-      - api-service
-    # Exposing only internally to the Docker network.
-    # Caddy will reverse-proxy requests here.
+      api-service:
+        condition: service_healthy
+    expose:
+      - "4022"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4022/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - x402-net
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    cpus: 1
 
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  x402-net:
+    name: x402-net

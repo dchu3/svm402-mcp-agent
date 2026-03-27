@@ -434,7 +434,6 @@ class TestTokenAnalyzer:
             )
 
             assert report.structured is not None
-            assert report.ai_analysis == ""
             assert mock_client.models.generate_content.call_count == 1
 
     def test_extract_solana_ui_amount_precision(self, mock_mcp_manager):

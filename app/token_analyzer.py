@@ -103,7 +103,6 @@ class AnalysisReport:
     """Complete analysis report for a token."""
 
     token_data: TokenData
-    ai_analysis: str
     generated_at: datetime
     structured: Optional[StructuredAnalysisReport] = None
 
@@ -213,17 +212,20 @@ class TokenAnalyzer:
         *,
         structured: bool = True,
     ) -> AnalysisReport:
-        """Analyze a token and generate a comprehensive report.
+        """Analyze a token and generate a structured AI report.
         
         Args:
             address: Token contract address
             chain: Blockchain (auto-detected if not provided)
-            structured: If True, generate structured JSON analysis for x402
+            structured: Must be True. Generates structured JSON analysis for x402
                 consumers.
             
         Returns:
-            Complete analysis report with AI insights
+            Structured analysis report with AI insights and market data.
         """
+        if not structured:
+            raise ValueError("structured=True is required for analysis")
+
         chain = normalize_chain_identifier(chain)
 
         # Auto-detect chain if not provided
@@ -255,11 +257,8 @@ class TokenAnalyzer:
                 token_data, ai_structured, verdict, generated_at
             )
 
-        ai_analysis = ""
-        
         return AnalysisReport(
             token_data=token_data,
-            ai_analysis=ai_analysis,
             generated_at=generated_at,
             structured=structured_report,
         )
