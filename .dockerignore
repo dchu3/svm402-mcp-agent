@@ -1,0 +1,49 @@
+# Build artifacts
+.venv/
+__pycache__/
+*.py[codz]
+*.egg-info/
+dist/
+build/
+
+# Git
+.git/
+.github/
+
+# Environment and secrets
+.env
+.envrc
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Node (from any local dev)
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation artifacts
+GEMINI.md
