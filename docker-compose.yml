@@ -8,16 +8,13 @@ services:
       MCP_DEXPAPRIKA_CMD: dexpaprika-mcp
       MCP_RUGCHECK_CMD: node /opt/mcp/dex-rugcheck-mcp/dist/index.js
       MCP_SOLANA_RPC_CMD: node /opt/mcp/solana-rpc-mcp/dist/index.js
-      MCP_TRADER_CMD: node /opt/mcp/dex-trader-mcp/dist/index.js
-    volumes:
-      - dex-bot-data:/home/botuser/.dex-bot
     # Enable interactive mode (stdin + tty)
     stdin_open: true
     tty: true
+    command: ["--interactive"]
 
   api-service:
     build: .
-    command: ["--http-api"]
     env_file:
       - .env
     environment:
@@ -25,25 +22,20 @@ services:
       MCP_DEXPAPRIKA_CMD: dexpaprika-mcp
       MCP_RUGCHECK_CMD: node /opt/mcp/dex-rugcheck-mcp/dist/index.js
       MCP_SOLANA_RPC_CMD: node /opt/mcp/solana-rpc-mcp/dist/index.js
-    volumes:
-      - dex-bot-data:/home/botuser/.dex-bot
-    expose:
-      - "8080"
+    ports:
+      - "8080:8080"
+    command: ["--http-api"]
 
+  # Express payment gateway
   analysis-server:
     build:
       context: ./server
     env_file:
       - .env
     environment:
+      # Explicitly set internal API URL so it resolves over Docker network
       PYTHON_API_URL: http://api-service:8080
-      # INTERNAL_API_SECRET is forwarded from the .env file via env_file above;
-      # listing it here makes the dependency explicit.
-      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
     ports:
       - "4022:4022"
     depends_on:
       - api-service
-
-volumes:
-  dex-bot-data:

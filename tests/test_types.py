@@ -1,4 +1,4 @@
-"""Tests for DEX Agentic Bot."""
+"""Tests for x402 MCP Token Analysis."""
 
 import pytest
 from app.types import PlannerResult

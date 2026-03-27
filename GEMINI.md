@@ -1,19 +1,17 @@
-# Project Overview: DEX Agentic Bot
+# Project Overview: x402 MCP Agent
 
-The DEX Agentic Bot is a CLI and Telegram bot for token safety analysis and autonomous portfolio management across multiple blockchains. It uses Gemini AI to orchestrate calls to MCP (Model Context Protocol) servers for data retrieval and analysis.
+The x402 MCP Agent is a CLI and API server for token safety analysis across multiple blockchains. It uses Gemini AI to orchestrate calls to MCP (Model Context Protocol) servers for data retrieval and analysis, providing a unified `analyze_token` tool for other AI agents to consume.
 
 ## Key Features:
 - **Agentic AI:** Gemini AI for natural language understanding and intelligent tool selection.
 - **Solana-Focused:** Full end-to-end support for Solana tokens.
 - **Safety Checks:** Rugcheck token safety analysis (Solana).
 - **Interactive CLI:** REPL mode with conversation memory and context management.
-- **Telegram Bot:** Send a token address, get an AI-powered analysis report.
-- **Portfolio Strategy:** Autonomous token discovery, position management, and exit execution with trailing stops (Solana).
-- **Flexible Output:** Formatted tables, raw text, or JSON.
+- **x402 Paid API:** Exposes the analysis pipeline as a structured JSON endpoint, requiring a USDC payment via the x402 protocol before returning results.
 
 ## Architecture:
 
-The core is a Python "Agentic Planner" that interacts with the Gemini API. It interprets user queries and orchestrates calls to MCP servers via native function calling. The `TokenAnalyzer` handles Telegram token reports as a parallel entry point.
+The core is a Python "Agentic Planner" that interacts with the Gemini API. It interprets user queries and orchestrates calls to MCP servers via native function calling. The `TokenAnalyzer` handles structured token reports for the x402 API endpoint.
 
 ### Core Flow
 
@@ -25,15 +23,15 @@ User Query → AgenticPlanner → Gemini AI ─┬→ MCP Clients → External A
 
 ```
 ┌──────────────────────────────────────────────────┐
-│           User Query (CLI / Telegram)            │
+│                User Query (CLI)                  │
 └──────────────────────┬───────────────────────────┘
                        │
           ┌────────────┴────────────┐
           ▼                         ▼
 ┌──────────────────┐     ┌──────────────────┐
 │  AgenticPlanner  │     │  TokenAnalyzer   │
-│  (interactive    │     │  (Telegram bot   │
-│   CLI queries)   │     │   token reports) │
+│  (interactive    │     │   (x402 API)     │
+│   CLI queries)   │     │                  │
 └────────┬─────────┘     └────────┬─────────┘
          │                        │
          └───────────┬────────────┘
@@ -43,24 +41,10 @@ User Query → AgenticPlanner → Gemini AI ─┬→ MCP Clients → External A
          │  (JSON-RPC / stdio)   │
          └───────────┬───────────┘
                      │
-    ┌────────┬───────┼───────┬────────┬────────┐
-    ▼        ▼       ▼       ▼        ▼        ▼
-DexScreener DexPap Rugcheck Solana  Trader
-  (price)  (pools) (safety)  (RPC) (trading)
-```
-
-The **Portfolio Strategy** runs as a separate subsystem:
-
-```
-PortfolioScheduler (discovery every 30min + exit checks every 60s)
-    │
-    ├── PortfolioDiscovery → DexScreener + Rugcheck + Gemini AI scoring
-    │
-    ├── PortfolioStrategy  → trailing stop updates, TP/SL/timeout checks
-    │
-    └── TraderExecution    → buy/sell via trader MCP
-    │
-    └── Database (SQLite)  → ~/.dex-bot/portfolio.db
+    ┌────────┬───────┼───────┐
+    ▼        ▼       ▼       ▼
+DexScreener DexPap Rugcheck Solana
+  (price)  (pools) (safety)  (RPC)
 ```
 
 ## Key Modules
@@ -68,18 +52,11 @@ PortfolioScheduler (discovery every 30min + exit checks every 60s)
 | Module | Purpose |
 |--------|---------|
 | `cli.py` | Entry point, interactive REPL mode and single queries |
+| `api_server.py` | FastAPI server exposing the x402 analysis endpoint |
 | `agent.py` | Multi-turn reasoning loop with Gemini; tool selection, execution, malformed call recovery |
 | `mcp_client.py` | Spawns and manages MCP server subprocesses via JSON-RPC over stdio |
 | `tool_converter.py` | Converts MCP tool schemas to Gemini `FunctionDeclaration` format |
 | `token_analyzer.py` | Parallel MCP calls for token analysis, chain detection, report synthesis |
-| `database.py` | SQLite persistence for portfolio positions (`~/.dex-bot/portfolio.db`) |
-| `portfolio_strategy.py` | Exit monitoring engine: TP/SL checks, trailing stop updates |
-| `portfolio_discovery.py` | Hybrid discovery pipeline: DexScreener → filters → rugcheck → Gemini scoring |
-| `portfolio_scheduler.py` | Async scheduler for discovery and exit check loops |
-| `execution.py` | Trade execution service via trader MCP (quote → execute) |
-| `price_cache.py` | Cached price lookups via DexScreener |
-| `telegram_notifier.py` | Telegram bot: address detection, message routing, alert delivery |
-| `telegram_subscribers.py` | Telegram subscriber management |
 | `config.py` | Pydantic settings loaded from `.env` |
 | `output.py` | Rich terminal formatting (tables, colors) |
 | `formatting.py` | Shared formatting utilities |
@@ -90,8 +67,9 @@ PortfolioScheduler (discovery every 30min + exit checks every 60s)
 - **Python 3.10+:** Main application logic.
 - **Google Generative AI SDK:** For interacting with the Gemini API.
 - **Pydantic & Pydantic Settings:** For configuration management and data validation.
+- **FastAPI:** Internal HTTP API.
 - **Rich:** For rich terminal output.
-- **Node.js 18+ & npm:** Used by MCP servers.
+- **Node.js 18+ & npm:** Used by MCP servers and the external x402 payment gateway.
 
 ## Building and Running:
 
@@ -122,11 +100,8 @@ Copy `.env.example` to `.env` and fill in your `GEMINI_API_KEY` and MCP server p
 # Interactive mode
 ./scripts/start.sh --interactive
 
-# Telegram bot only
-./scripts/start.sh --telegram-only
-
-# Portfolio strategy
-./scripts/start.sh --interactive --portfolio
+# HTTP API server
+./scripts/start.sh --http-api
 ```
 
 ### Development
@@ -147,7 +122,6 @@ MCP tools are namespaced as `{client}_{method}` (e.g., `dexscreener_search_pairs
 
 - All MCP calls are async; use `asyncio.gather()` for parallel tool execution.
 - `MCPClient` uses locks (`_init_lock`, `_lock`) for thread-safe process communication.
-- Background tasks (polling, Telegram) use `asyncio.create_task()`.
 
 ### Configuration
 
@@ -169,7 +143,3 @@ The `AgenticPlanner` has built-in recovery for malformed Gemini function calls:
 - Detects `MALFORMED_FUNCTION_CALL` in finish_reason
 - Retries up to 2 times with progressively simpler prompts
 - Falls back to text-only response if recovery fails
-
-### Modular Design
-
-The application is structured into clear modules: CLI, agent logic, MCP management, portfolio strategy, output handling, and type definitions. Python typing and structured logging are used throughout.

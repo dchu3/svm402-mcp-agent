@@ -136,7 +136,6 @@ async def test_analyze_happy_path_returns_structured_response(monkeypatch):
             ),
             ai_analysis="Looks healthy.",
             generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            telegram_message="Token Analysis Report",
             structured=structured,
         )
     )
@@ -168,7 +167,6 @@ async def test_analyze_happy_path_returns_structured_response(monkeypatch):
         _VALID_SOLANA_ADDR,
         "solana",
         structured=True,
-        legacy_output=False,
     )
 
 
@@ -186,7 +184,6 @@ async def test_analyze_with_holder_snapshot(monkeypatch):
             token_data=TokenData(address=_VALID_SOLANA_ADDR, chain="solana", safety_status="Safe"),
             ai_analysis="Report.",
             generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            telegram_message="Report",
             structured=structured,
         )
     )

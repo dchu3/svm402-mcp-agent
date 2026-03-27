@@ -375,10 +375,8 @@ class MCPManager:
         dexpaprika_cmd: str,
         rugcheck_cmd: str = "",
         solana_rpc_cmd: str = "",
-        trader_cmd: str = "",
         call_timeout: float = 90.0,
         solana_rpc_url: str = "",
-        trader_env: Optional[Dict[str, str]] = None,
         max_concurrent_per_server: int = 8,
     ) -> None:
         if max_concurrent_per_server < 1:
@@ -389,8 +387,6 @@ class MCPManager:
         self.rugcheck = MCPClient("rugcheck", rugcheck_cmd, call_timeout=call_timeout, max_concurrent=mc) if rugcheck_cmd else None
         solana_extra_env = {"SOLANA_RPC_URL": solana_rpc_url} if solana_rpc_url else None
         self.solana = MCPClient("solana", solana_rpc_cmd, call_timeout=call_timeout, extra_env=solana_extra_env, max_concurrent=mc) if solana_rpc_cmd else None
-        # retry_on_timeout=False: trader executes swaps; retrying on timeout risks a double submission.
-        self.trader = MCPClient("trader", trader_cmd, call_timeout=call_timeout, retry_on_timeout=False, extra_env=trader_env, max_concurrent=mc) if trader_cmd else None
         self._gemini_functions_cache: Optional[List["types.FunctionDeclaration"]] = None
 
     async def start(self) -> None:
@@ -402,8 +398,6 @@ class MCPManager:
             tasks.append(self.rugcheck.start())
         if self.solana:
             tasks.append(self.solana.start())
-        if self.trader:
-            tasks.append(self.trader.start())
         await asyncio.gather(*tasks)
         self._gemini_functions_cache = None  # Invalidate after (re)start
 
@@ -416,8 +410,6 @@ class MCPManager:
             tasks.append(self.rugcheck.stop())
         if self.solana:
             tasks.append(self.solana.stop())
-        if self.trader:
-            tasks.append(self.trader.stop())
         await asyncio.gather(*tasks)
         self._gemini_functions_cache = None  # Invalidate on shutdown
 
@@ -432,8 +424,6 @@ class MCPManager:
             clients.append(self.rugcheck)
         if self.solana:
             clients.append(self.solana)
-        if self.trader:
-            clients.append(self.trader)
         for client in clients:
             all_functions.extend(client.to_gemini_functions())
         self._gemini_functions_cache = all_functions
@@ -479,8 +469,6 @@ class MCPManager:
             clients.append(self.rugcheck)
         if self.solana:
             clients.append(self.solana)
-        if self.trader:
-            clients.append(self.trader)
         for client in clients:
             if client.tools:
                 lines.append(f"\n### {client.name} tools:")
@@ -526,6 +514,5 @@ class MCPManager:
             "dexpaprika": self.dexpaprika,
             "rugcheck": self.rugcheck,
             "solana": self.solana,
-            "trader": self.trader,
         }
         return clients.get(name)

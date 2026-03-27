@@ -105,8 +105,6 @@ class AnalysisReport:
     token_data: TokenData
     ai_analysis: str
     generated_at: datetime
-    telegram_message: str
-    tweet_message: str = ""
     structured: Optional[StructuredAnalysisReport] = None
 
 
@@ -157,28 +155,6 @@ def is_valid_token_address(text: str) -> bool:
     return bool(SOLANA_ADDRESS_PATTERN.match(text))
 
 
-# System prompt for token analysis (legacy free-text)
-ANALYSIS_SYSTEM_PROMPT = """You are a crypto token analyst providing comprehensive safety and market analysis reports.
-
-## Your Task
-Analyze the provided token data and generate a clear, actionable report for the user.
-
-## Analysis Focus Areas
-1. **Safety Assessment**: Evaluate rugcheck results, identify red flags
-2. **Market Health**: Analyze liquidity depth, volume trends, price stability
-3. **Risk Factors**: Identify potential concerns (low liquidity, high taxes, centralized ownership)
-4. **Overall Rating**: Provide a clear safety verdict
-
-## Response Format
-Provide a concise analysis in 2-3 paragraphs:
-1. Safety summary and any red flags
-2. Market/liquidity analysis
-3. Overall assessment and recommendation
-
-Keep it brief but informative. Use plain text, no markdown formatting.
-Do NOT repeat the raw data - the user already sees that in the report header.
-Focus on INSIGHTS and INTERPRETATION of the data.
-"""
 
 # System prompt for structured JSON analysis (x402 endpoint)
 STRUCTURED_ANALYSIS_SYSTEM_PROMPT = """You are a crypto token analyst. Analyze the provided token data and return a JSON object with your assessment.
@@ -206,11 +182,6 @@ Guidelines:
 Return ONLY the JSON object, no markdown, no explanation.
 """
 
-TWEET_ANALYSIS_SYSTEM_PROMPT = """You are a crypto token analyst. Provide a single punchy sentence summarizing the token's safety and market outlook.
-
-Keep it under 100 characters. No markdown. No disclaimers. Be direct and opinionated.
-Examples: "Solid liquidity and clean contract — looks healthy.", "Low liquidity and high sell tax — proceed with caution."
-"""
 
 
 class TokenAnalyzer:
@@ -241,7 +212,6 @@ class TokenAnalyzer:
         chain: Optional[str] = None,
         *,
         structured: bool = True,
-        legacy_output: bool = True,
     ) -> AnalysisReport:
         """Analyze a token and generate a comprehensive report.
         
@@ -249,19 +219,12 @@ class TokenAnalyzer:
             address: Token contract address
             chain: Blockchain (auto-detected if not provided)
             structured: If True, generate structured JSON analysis for x402
-                consumers. If False, skip the extra Gemini call to reduce
-                latency/cost (e.g. for Telegram bot callers).
-            legacy_output: If True, generate the free-text/tweet summaries
-                used by Telegram and CLI callers. If False, skip those extra
-                Gemini calls and return only structured output.
+                consumers.
             
         Returns:
             Complete analysis report with AI insights
         """
         chain = normalize_chain_identifier(chain)
-
-        if not structured and not legacy_output:
-            raise ValueError("At least one of structured or legacy_output must be True")
 
         # Auto-detect chain if not provided
         if not chain:
@@ -292,30 +255,12 @@ class TokenAnalyzer:
                 token_data, ai_structured, verdict, generated_at
             )
 
-        if legacy_output:
-            # Generate legacy free-text AI analysis (for telegram_message)
-            ai_analysis = await self._generate_ai_analysis(token_data)
-
-            # Reuse structured verdict for tweet when available, otherwise call Gemini
-            if verdict and verdict.one_sentence and verdict.one_sentence != "Insufficient data for analysis.":
-                tweet_verdict = verdict.one_sentence[:100]
-            else:
-                tweet_verdict = await self._generate_tweet_verdict(token_data)
-
-            # Format as Telegram messages
-            telegram_message = self._format_telegram_report(token_data, ai_analysis)
-            tweet_message = self._format_tweet_report(token_data, tweet_verdict)
-        else:
-            ai_analysis = ""
-            telegram_message = structured_report.human_readable if structured_report else ""
-            tweet_message = verdict.one_sentence[:100] if verdict else ""
+        ai_analysis = ""
         
         return AnalysisReport(
             token_data=token_data,
             ai_analysis=ai_analysis,
             generated_at=generated_at,
-            telegram_message=telegram_message,
-            tweet_message=tweet_message,
             structured=structured_report,
         )
 
@@ -871,21 +816,6 @@ class TokenAnalyzer:
         
         return "\n".join(lines)
 
-    @staticmethod
-    def _build_dexscreener_url(chain: str, pair_address: Optional[str], token_address: str) -> str:
-        """Build DexScreener URL for the token.
-        
-        Args:
-            chain: Blockchain name (e.g., 'solana')
-            pair_address: Liquidity pair address (preferred)
-            token_address: Token contract address (fallback for search)
-            
-        Returns:
-            DexScreener URL (pair page if available, otherwise search page)
-        """
-        if pair_address:
-            return f"https://dexscreener.com/{chain.lower()}/{pair_address}"
-        return f"https://dexscreener.com/search?q={token_address}"
 
     async def _generate_tweet_verdict(self, token_data: TokenData) -> str:
         """Generate a single-sentence AI verdict for the tweet summary."""
@@ -914,123 +844,7 @@ class TokenAnalyzer:
             self._log("error", f"Tweet verdict generation failed: {str(e)}")
             return "Verdict unavailable."
 
-    def _format_tweet_report(self, token_data: TokenData, tweet_verdict: str) -> str:
-        """Format a concise tweet-friendly Telegram message (~500 chars)."""
-        safety_emoji = {
-            "Safe": "✅",
-            "Risky": "⚠️",
-            "Honeypot": "❌",
-            "Dangerous": "❌",
-            "Unverified": "❓",
-            "Unknown": "❓",
-        }.get(token_data.safety_status, "❓")
-        
-        change = token_data.price_change_24h or 0
-        change_emoji = "🟢" if change >= 0 else "🔴"
-        
-        price_fmt = format_price(token_data.price_usd)
-        mcap_fmt = format_large_number(token_data.market_cap)
-        volume_fmt = format_large_number(token_data.volume_24h)
-        liquidity_fmt = format_large_number(token_data.liquidity_usd)
-        
-        lines = [
-            f"🔍 <b>{token_data.symbol or 'Unknown'}</b> ({token_data.chain.capitalize()})",
-            f"<code>{token_data.address}</code>",
-            f"💰 {price_fmt} {change_emoji} {change:+.2f}%",
-            f"📊 MCap: {mcap_fmt} | Vol: {volume_fmt}",
-            f"💧 Liq: {liquidity_fmt}",
-            f"🛡️ {safety_emoji} {token_data.safety_status}",
-            f"🤖 {tweet_verdict}",
-        ]
-        
-        return "\n".join(lines)
 
-    def _format_telegram_report(self, token_data: TokenData, ai_analysis: str) -> str:
-        """Format the analysis as a Telegram HTML message."""
-        # Safety emoji
-        safety_emoji = {
-            "Safe": "✅",
-            "Risky": "⚠️",
-            "Honeypot": "❌",
-            "Dangerous": "❌",
-            "Unverified": "❓",
-            "Unknown": "❓",
-        }.get(token_data.safety_status, "❓")
-        
-        # Price change emoji
-        change = token_data.price_change_24h or 0
-        change_emoji = "🟢" if change >= 0 else "🔴"
-        
-        # Format numbers
-        price_fmt = format_price(token_data.price_usd)
-        volume_fmt = format_large_number(token_data.volume_24h)
-        liquidity_fmt = format_large_number(token_data.liquidity_usd)
-        mcap_fmt = format_large_number(token_data.market_cap)
-        
-        # Build DexScreener URL
-        pair_address = token_data.pools[0].get("pair") if token_data.pools else None
-        dexscreener_url = self._build_dexscreener_url(
-            token_data.chain, pair_address, token_data.address
-        )
-        
-        lines = [
-            "🔍 <b>Token Analysis Report</b>",
-            "",
-            f"<b>Token:</b> {token_data.symbol or 'Unknown'}",
-            f"<b>Chain:</b> {token_data.chain.capitalize()}",
-            f"<b>Address:</b> <code>{token_data.address}</code>",
-            f'📊 <a href="{dexscreener_url}">View on DexScreener</a>',
-            "",
-            "━━━ 💰 <b>Price &amp; Market</b> ━━━",
-            f"<b>Price:</b> {price_fmt}",
-            f"<b>24h Change:</b> {change_emoji} {change:+.2f}%",
-            f"<b>Market Cap:</b> {mcap_fmt}",
-            f"<b>Volume 24h:</b> {volume_fmt}",
-            "",
-            "━━━ 💧 <b>Liquidity</b> ━━━",
-            f"<b>Total:</b> {liquidity_fmt}",
-        ]
-        
-        # Add top pool
-        if token_data.pools:
-            top_pool = token_data.pools[0]
-            pool_liq = format_large_number(top_pool.get("liquidity"))
-            lines.append(f"<b>Top Pool:</b> {top_pool['dex']} ({pool_liq})")
-
-        if token_data.lp_locked_pct is not None:
-            lines.append(f"<b>🔒 LP Locked:</b> {token_data.lp_locked_pct:.1f}%")
-        
-        # Safety section
-        lines.extend([
-            "",
-            "━━━ 🛡️ <b>Safety Check</b> ━━━",
-            f"<b>Status:</b> {safety_emoji} {token_data.safety_status}",
-        ])
-        
-        # Add safety details
-        if token_data.safety_data and isinstance(token_data.safety_data, dict):
-            sim = token_data.safety_data.get("simulationResult", {})
-            if sim:
-                buy_tax = sim.get("buyTax", "N/A")
-                sell_tax = sim.get("sellTax", "N/A")
-                lines.append(f"<b>Buy Tax:</b> {buy_tax}%")
-                lines.append(f"<b>Sell Tax:</b> {sell_tax}%")
-        
-        # AI Analysis section
-        lines.extend([
-            "",
-            "━━━ 🤖 <b>AI Analysis</b> ━━━",
-            ai_analysis,
-        ])
-        
-        # Footer
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        lines.extend([
-            "",
-            f"⏰ {timestamp}",
-        ])
-        
-        return "\n".join(lines)
 
     @staticmethod
     def _safe_float(value: Any) -> Optional[float]:
