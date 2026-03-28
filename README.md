@@ -153,7 +153,7 @@ The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compati
 {
   "mcpServers": {
     "dex-analysis": {
-      "httpUrl": "https://your-domain.com/mcp",
+      "httpUrl": "https://svm402.com/mcp",
       "trust": true
     }
   }
@@ -162,13 +162,13 @@ The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compati
 
 Or add via CLI:
 ```bash
-gemini mcp add --transport http dex-analysis https://your-domain.com/mcp
+gemini mcp add --transport http dex-analysis https://svm402.com/mcp
 ```
 
 **Quick Test (Free Tool)** — verify the connection using `curl`:
 
 ```bash
-curl -X POST https://your-domain.com/mcp \
+curl -X POST https://svm402.com/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"So11111111111111111111111111111111111111112"}},"id":1}'
 ```
