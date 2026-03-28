@@ -57,6 +57,7 @@ services:
     environment:
       PYTHON_API_URL: http://api-service:8080
       SERVER_PORT: 4022
+      SERVER_TRUST_PROXY: "true"
       # Write audit log to tmpfs since the root filesystem is read-only.
       X402_AUDIT_LOG_PATH: /tmp/x402-audit.log
     depends_on:

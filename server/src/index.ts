@@ -70,6 +70,45 @@ const BALANCE_TIMEOUT_MS = parseTimeoutMs(
   "SERVER_BALANCE_TIMEOUT_MS"
 );
 
+// --- In-memory cache for free tools ---
+interface CachedBalance {
+  sol_balance: number;
+  usdc_balance: number;
+  expiresAt: number;
+}
+const balanceCache = new Map<string, CachedBalance>();
+const BALANCE_CACHE_TTL_MS = 60_000; // 60 seconds
+
+// --- Coalesce pending balance RPC calls to prevent thundering herd ---
+const pendingFetches = new Map<string, Promise<{ sol_balance: number; usdc_balance: number }>>();
+
+// --- Per-IP rate limiting for free tools (manual) ---
+interface IpUsage {
+  count: number;
+  resetAt: number;
+}
+const freeToolIpLimits = new Map<string, IpUsage>();
+const FREE_TOOL_MAX_PER_WINDOW = 10;
+const FREE_TOOL_WINDOW_MS = 60_000; // 1 minute
+
+/** Clear caches and rate limits (for testing only). */
+export function clearFreeToolCache(): void {
+  balanceCache.clear();
+  pendingFetches.clear();
+  freeToolIpLimits.clear();
+}
+
+// Periodically prune expired entries to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of balanceCache.entries()) {
+    if (now >= val.expiresAt) balanceCache.delete(key);
+  }
+  for (const [key, val] of freeToolIpLimits.entries()) {
+    if (now >= val.resetAt) freeToolIpLimits.delete(key);
+  }
+}, 300_000).unref(); // Every 5 minutes
+
 function parseTimeoutMs(
   rawValue: string | undefined,
   defaultValue: number,
@@ -129,6 +168,7 @@ export function makeMcpServer(
   analysisPriceMicrounits: string,
   pendingPayment?: PendingPayment,
   auditCtx?: PaymentAuditContext,
+  clientIp?: string,
 ): McpServer {
   const server = new McpServer({ name: "dex-analysis", version: "1.0.0" });
 
@@ -398,10 +438,12 @@ export function makeMcpServer(
         usdc_balance: z.number(),
         analysis_price_usdc: z.number(),
         can_afford_analysis: z.boolean(),
+        _cached: z.boolean().optional(),
       },
     },
     async ({ address }) => {
-      if (!SOLANA_ADDRESS_RE.test(address.trim())) {
+      const trimmedAddress = address.trim();
+      if (!SOLANA_ADDRESS_RE.test(trimmedAddress)) {
         return {
           content: [
             { type: "text", text: "Invalid Solana wallet address format" },
@@ -410,42 +452,109 @@ export function makeMcpServer(
         };
       }
 
-      try {
-        // Fetch SOL balance (returns { value: lamports })
-        const solResponse = await solanaRpc<{ value: number }>("getBalance", [
-          address.trim(),
-          { commitment: "confirmed" },
-        ]);
-        const solBalance = solResponse.value / 1e9;
-
-        // Fetch USDC token accounts for this wallet
-        let usdcBalance = 0;
-        try {
-          const tokenAccounts = await solanaRpc<{
-            value: Array<{
-              account: {
-                data: { parsed: { info: { tokenAmount: { uiAmount: number } } } };
-              };
-            }>;
-          }>("getTokenAccountsByOwner", [
-            address.trim(),
-            { mint: usdcMint },
-            { encoding: "jsonParsed", commitment: "confirmed" },
-          ]);
-          for (const acc of tokenAccounts.value) {
-            usdcBalance +=
-              acc.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+      // --- Manual per-IP rate limiting for free tool ---
+      if (clientIp) {
+        const now = Date.now();
+        const usage = freeToolIpLimits.get(clientIp);
+        if (usage && now < usage.resetAt) {
+          if (usage.count >= FREE_TOOL_MAX_PER_WINDOW) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Too many balance checks. Please try again in a minute.",
+                },
+              ],
+              isError: true,
+            };
           }
-        } catch {
-          // No USDC accounts — balance stays 0
+          usage.count++;
+        } else {
+          freeToolIpLimits.set(clientIp, {
+            count: 1,
+            resetAt: now + FREE_TOOL_WINDOW_MS,
+          });
+        }
+      }
+
+      // --- Cache check ---
+      const cached = balanceCache.get(trimmedAddress);
+      if (cached) {
+        if (Date.now() < cached.expiresAt) {
+          const result = {
+            address: trimmedAddress,
+            sol_balance: cached.sol_balance,
+            usdc_balance: cached.usdc_balance,
+            analysis_price_usdc: analysisPriceUsdc,
+            can_afford_analysis: cached.usdc_balance >= analysisPriceUsdc,
+            _cached: true,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        }
+        // Entry is expired; remove it so the cache doesn't retain stale addresses.
+        balanceCache.delete(trimmedAddress);
+      }
+
+      try {
+        // --- Thundering herd check: coalesce pending RPC calls ---
+        let balanceData: { sol_balance: number; usdc_balance: number };
+        const pending = pendingFetches.get(trimmedAddress);
+        if (pending) {
+          balanceData = await pending;
+        } else {
+          const fetchPromise = (async () => {
+            // Fetch SOL balance (returns { value: lamports })
+            const solResponse = await solanaRpc<{ value: number }>("getBalance", [
+              trimmedAddress,
+              { commitment: "confirmed" },
+            ]);
+            const sol = solResponse.value / 1e9;
+
+            // Fetch USDC token accounts for this wallet
+            let usdc = 0;
+            try {
+              const tokenAccounts = await solanaRpc<{
+                value: Array<{
+                  account: {
+                    data: { parsed: { info: { tokenAmount: { uiAmount: number } } } };
+                  };
+                }>;
+              }>("getTokenAccountsByOwner", [
+                trimmedAddress,
+                { mint: usdcMint },
+                { encoding: "jsonParsed", commitment: "confirmed" },
+              ]);
+              for (const acc of tokenAccounts.value) {
+                usdc += acc.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+              }
+            } catch {
+              // No USDC accounts — balance stays 0
+            }
+            return { sol_balance: sol, usdc_balance: usdc };
+          })();
+
+          pendingFetches.set(trimmedAddress, fetchPromise);
+          try {
+            balanceData = await fetchPromise;
+            // --- Update cache ---
+            balanceCache.set(trimmedAddress, {
+              ...balanceData,
+              expiresAt: Date.now() + BALANCE_CACHE_TTL_MS,
+            });
+          } finally {
+            pendingFetches.delete(trimmedAddress);
+          }
         }
 
         const result = {
-          address: address.trim(),
-          sol_balance: solBalance,
-          usdc_balance: usdcBalance,
+          address: trimmedAddress,
+          sol_balance: balanceData.sol_balance,
+          usdc_balance: balanceData.usdc_balance,
           analysis_price_usdc: analysisPriceUsdc,
-          can_afford_analysis: usdcBalance >= analysisPriceUsdc,
+          can_afford_analysis: balanceData.usdc_balance >= analysisPriceUsdc,
         };
 
         return {
@@ -477,8 +586,11 @@ async function main(): Promise<void> {
   const analysisPriceMicrounits = paymentConfig.accepts[0].amount;
   const app = express();
 
-  // Trust proxy (for correct client IP behind Caddy/nginx)
-  app.set("trust proxy", 1);
+  // Trust proxy (for correct client IP behind Caddy/nginx).
+  // Only enable if specifically requested via config to prevent IP spoofing.
+  if (process.env.SERVER_TRUST_PROXY === "true" || process.env.SERVER_TRUST_PROXY === "1") {
+    app.set("trust proxy", 1);
+  }
 
   // Security middleware
   app.use(requestId);
@@ -761,6 +873,7 @@ async function main(): Promise<void> {
         analysisPriceMicrounits,
         pendingPayment,
         auditCtx,
+        req.ip,
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined, // Stateless: no session state
