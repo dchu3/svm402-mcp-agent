@@ -70,6 +70,24 @@ const BALANCE_TIMEOUT_MS = parseTimeoutMs(
   "SERVER_BALANCE_TIMEOUT_MS"
 );
 
+// --- In-memory cache for free tools ---
+interface CachedBalance {
+  sol_balance: number;
+  usdc_balance: number;
+  expiresAt: number;
+}
+const balanceCache = new Map<string, CachedBalance>();
+const BALANCE_CACHE_TTL_MS = 60_000; // 60 seconds
+
+// --- Per-IP rate limiting for free tools (manual) ---
+interface IpUsage {
+  count: number;
+  resetAt: number;
+}
+const freeToolIpLimits = new Map<string, IpUsage>();
+const FREE_TOOL_MAX_PER_WINDOW = 10;
+const FREE_TOOL_WINDOW_MS = 60_000; // 1 minute
+
 function parseTimeoutMs(
   rawValue: string | undefined,
   defaultValue: number,
@@ -129,6 +147,7 @@ export function makeMcpServer(
   analysisPriceMicrounits: string,
   pendingPayment?: PendingPayment,
   auditCtx?: PaymentAuditContext,
+  clientIp?: string,
 ): McpServer {
   const server = new McpServer({ name: "dex-analysis", version: "1.0.0" });
 
@@ -401,7 +420,8 @@ export function makeMcpServer(
       },
     },
     async ({ address }) => {
-      if (!SOLANA_ADDRESS_RE.test(address.trim())) {
+      const trimmedAddress = address.trim();
+      if (!SOLANA_ADDRESS_RE.test(trimmedAddress)) {
         return {
           content: [
             { type: "text", text: "Invalid Solana wallet address format" },
@@ -410,10 +430,52 @@ export function makeMcpServer(
         };
       }
 
+      // --- Manual per-IP rate limiting for free tool ---
+      if (clientIp) {
+        const now = Date.now();
+        const usage = freeToolIpLimits.get(clientIp);
+        if (usage && now < usage.resetAt) {
+          if (usage.count >= FREE_TOOL_MAX_PER_WINDOW) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: "Too many balance checks. Please try again in a minute.",
+                },
+              ],
+              isError: true,
+            };
+          }
+          usage.count++;
+        } else {
+          freeToolIpLimits.set(clientIp, {
+            count: 1,
+            resetAt: now + FREE_TOOL_WINDOW_MS,
+          });
+        }
+      }
+
+      // --- Cache check ---
+      const cached = balanceCache.get(trimmedAddress);
+      if (cached && Date.now() < cached.expiresAt) {
+        const result = {
+          address: trimmedAddress,
+          sol_balance: cached.sol_balance,
+          usdc_balance: cached.usdc_balance,
+          analysis_price_usdc: analysisPriceUsdc,
+          can_afford_analysis: cached.usdc_balance >= analysisPriceUsdc,
+          _cached: true,
+        };
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+        };
+      }
+
       try {
         // Fetch SOL balance (returns { value: lamports })
         const solResponse = await solanaRpc<{ value: number }>("getBalance", [
-          address.trim(),
+          trimmedAddress,
           { commitment: "confirmed" },
         ]);
         const solBalance = solResponse.value / 1e9;
@@ -428,7 +490,7 @@ export function makeMcpServer(
               };
             }>;
           }>("getTokenAccountsByOwner", [
-            address.trim(),
+            trimmedAddress,
             { mint: usdcMint },
             { encoding: "jsonParsed", commitment: "confirmed" },
           ]);
@@ -441,12 +503,19 @@ export function makeMcpServer(
         }
 
         const result = {
-          address: address.trim(),
+          address: trimmedAddress,
           sol_balance: solBalance,
           usdc_balance: usdcBalance,
           analysis_price_usdc: analysisPriceUsdc,
           can_afford_analysis: usdcBalance >= analysisPriceUsdc,
         };
+
+        // --- Update cache ---
+        balanceCache.set(trimmedAddress, {
+          sol_balance: solBalance,
+          usdc_balance: usdcBalance,
+          expiresAt: Date.now() + BALANCE_CACHE_TTL_MS,
+        });
 
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
@@ -761,6 +830,7 @@ async function main(): Promise<void> {
         analysisPriceMicrounits,
         pendingPayment,
         auditCtx,
+        req.ip,
       );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined, // Stateless: no session state
@@ -783,7 +853,7 @@ async function main(): Promise<void> {
   // Global error handler (must be registered last)
   app.use(globalErrorHandler);
 
-  app.listen(SERVER_PORT, () => {
+  app.listen(SERVER_PORT, "0.0.0.0", () => {
     console.log(`DEX Analysis MCP server listening on port ${SERVER_PORT}`);
     console.log(
       `Tool calls require USDC payment via x402 (facilitator: ${FACILITATOR_URL})`
