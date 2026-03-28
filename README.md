@@ -144,16 +144,33 @@ This starts three services:
 
 The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compatible client can connect to it by pointing at the server URL.
 
+> [!NOTE]
+> Standard MCP clients (like Gemini CLI or Claude Desktop) do not natively support x402 payments. They can be used to call free tools like `get_wallet_balance`, but will receive a `402 Payment Required` error when calling `analyze_token`. See [server/README.md](server/README.md) for examples of payment-enabled clients.
+
 **Gemini CLI** — add to `~/.gemini/settings.json`:
 
 ```json
 {
   "mcpServers": {
     "dex-analysis": {
-      "url": "https://your-domain.com/mcp"
+      "httpUrl": "https://your-domain.com/mcp",
+      "trust": true
     }
   }
 }
+```
+
+Or add via CLI:
+```bash
+gemini mcp add --transport http dex-analysis https://your-domain.com/mcp
+```
+
+**Quick Test (Free Tool)** — verify the connection using `curl`:
+
+```bash
+curl -X POST https://your-domain.com/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"So11111111111111111111111111111111111111112"}},"id":1}'
 ```
 
 ## Architecture
