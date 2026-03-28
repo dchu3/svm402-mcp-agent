@@ -135,6 +135,13 @@ export function toUsdcMicrounits(priceStr: string): bigint {
 export const MAX_RETRIES = 3;
 export const INITIAL_BACKOFF_MS = 2000;
 
+export class PermanentConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PermanentConfigError";
+  }
+}
+
 export async function fetchFacilitatorFeePayer(network: string): Promise<string> {
   let lastError: Error | undefined;
 
@@ -154,10 +161,16 @@ export async function fetchFacilitatorFeePayer(network: string): Promise<string>
         headers: { ...authHeaders },
         signal: AbortSignal.timeout(10000),
       });
+
       if (!res.ok) {
-        throw new Error(
-          `Failed to fetch facilitator /supported (${res.status}): ${res.statusText}`,
-        );
+        const errorMsg = `Failed to fetch facilitator /supported (${res.status}): ${res.statusText}`;
+        // Retry on 5xx (server errors) or 429 (rate limit).
+        // Treat other 4xx (401, 403, 404) as permanent config/auth errors.
+        if (res.status >= 500 || res.status === 429) {
+          throw new Error(errorMsg);
+        } else {
+          throw new PermanentConfigError(errorMsg);
+        }
       }
 
       const data = (await res.json()) as {
@@ -191,16 +204,16 @@ export async function fetchFacilitatorFeePayer(network: string): Promise<string>
       }
 
       // No match is a permanent config error — don't retry.
-      throw new Error(
+      throw new PermanentConfigError(
         `Facilitator does not list a feePayer for network "${network}". ` +
           `Check SERVER_SOLANA_NETWORK and X402_FACILITATOR_URL.`,
       );
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
-      // Config errors (no matching network) should not be retried.
-      if (lastError.message.includes("does not list a feePayer")) {
+      if (lastError instanceof PermanentConfigError) {
         throw lastError;
       }
+      // Continue loop for other errors (network errors, timeouts, 5xx/429)
     }
   }
 

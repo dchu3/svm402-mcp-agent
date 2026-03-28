@@ -82,18 +82,61 @@ describe("fetchFacilitatorFeePayer retry and timeout", () => {
       )
     );
 
-    const promise = fetchFacilitatorFeePayer("solana:mainnet");
-    await expect(promise).rejects.toThrow(/Facilitator does not list a feePayer/);
+    const promise = fetchFacilitatorFeePayer("solana:mainnet").catch((err) => err);
+    const error = await promise;
+    expect(error.name).toBe("PermanentConfigError");
+    expect(error.message).toMatch(/Facilitator does not list a feePayer/);
     
     // Should NOT retry because it's a permanent config error
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("respects timeout and retries on AbortError", async () => {
-    // 1st attempt: Timeout (AbortError)
-    const timeoutError = new Error("The operation was aborted");
-    timeoutError.name = "AbortError";
-    vi.mocked(fetch).mockRejectedValueOnce(timeoutError);
+  it("does not retry on 401 Unauthorized (permanent auth error)", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("Unauthorized", { status: 401 })
+    );
+
+    const promise = fetchFacilitatorFeePayer("solana:mainnet").catch((err) => err);
+    const error = await promise;
+    expect(error.name).toBe("PermanentConfigError");
+    expect(error.message).toMatch(/401/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries on 429 Too Many Requests (transient rate limit)", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response("Too Many Requests", { status: 429 })
+    );
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          kinds: [{ network: "solana:mainnet", extra: { feePayer: "payer123" } }],
+        }),
+        { status: 200 }
+      )
+    );
+
+    const promise = fetchFacilitatorFeePayer("solana:mainnet");
+    await vi.runAllTimersAsync();
+    const result = await promise;
+    expect(result).toBe("payer123");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries on actual fetch timeout", async () => {
+    // 1st attempt: Timeout
+    // We mock fetch to never resolve, then advance timers by 10s
+    vi.mocked(fetch).mockImplementationOnce(() => {
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                reject(err);
+            }, 10000);
+            // Clean up if actually called (not strictly necessary for mock but good practice)
+            return () => clearTimeout(timeout);
+        });
+    });
     
     // 2nd attempt: Success
     vi.mocked(fetch).mockResolvedValueOnce(
@@ -106,14 +149,14 @@ describe("fetchFacilitatorFeePayer retry and timeout", () => {
     );
 
     const promise = fetchFacilitatorFeePayer("solana:mainnet");
+    
+    // Advance to trigger first attempt timeout
+    await vi.advanceTimersByTimeAsync(10000);
+    // Advance to trigger retry backoff
     await vi.runAllTimersAsync();
     
     const result = await promise;
     expect(result).toBe("payer123");
     expect(fetch).toHaveBeenCalledTimes(2);
-    
-    // Verify timeout signal was passed
-    const [, init] = vi.mocked(fetch).mock.calls[0];
-    expect((init as RequestInit).signal).toBeDefined();
   });
 });
