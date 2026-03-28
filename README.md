@@ -152,7 +152,8 @@ The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compati
 ```bash
 curl -X POST https://svm402.com/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"So11111111111111111111111111111111111111112"}},"id":1}'
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"<WALLET_ADDRESS>"}},"id":1}'
 ```
 
 
