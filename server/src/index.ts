@@ -91,6 +91,13 @@ const freeToolIpLimits = new Map<string, IpUsage>();
 const FREE_TOOL_MAX_PER_WINDOW = 10;
 const FREE_TOOL_WINDOW_MS = 60_000; // 1 minute
 
+/** Clear caches and rate limits (for testing only). */
+export function clearFreeToolCache(): void {
+  balanceCache.clear();
+  pendingFetches.clear();
+  freeToolIpLimits.clear();
+}
+
 // Periodically prune expired entries to prevent memory leaks
 setInterval(() => {
   const now = Date.now();
@@ -100,7 +107,7 @@ setInterval(() => {
   for (const [key, val] of freeToolIpLimits.entries()) {
     if (now >= val.resetAt) freeToolIpLimits.delete(key);
   }
-}, 300_000); // Every 5 minutes
+}, 300_000).unref(); // Every 5 minutes
 
 function parseTimeoutMs(
   rawValue: string | undefined,
@@ -431,6 +438,7 @@ export function makeMcpServer(
         usdc_balance: z.number(),
         analysis_price_usdc: z.number(),
         can_afford_analysis: z.boolean(),
+        _cached: z.boolean().optional(),
       },
     },
     async ({ address }) => {
@@ -488,7 +496,7 @@ export function makeMcpServer(
 
       try {
         // --- Thundering herd check: coalesce pending RPC calls ---
-        let balanceData;
+        let balanceData: { sol_balance: number; usdc_balance: number };
         const pending = pendingFetches.get(trimmedAddress);
         if (pending) {
           balanceData = await pending;
