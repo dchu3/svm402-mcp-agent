@@ -150,7 +150,7 @@ The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compati
 {
   "mcpServers": {
     "dex-analysis": {
-      "url": "https://your-domain.com/mcp"
+      "url": "https://svm402.com/mcp"
     }
   }
 }
