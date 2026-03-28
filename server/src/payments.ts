@@ -128,49 +128,83 @@ export function toUsdcMicrounits(priceStr: string): bigint {
  *
  * The x402 SVM SDK requires `extra.feePayer` in payment requirements — this is
  * the Solana address that pays transaction fees when the facilitator settles.
+ *
+ * Retries up to {@link MAX_RETRIES} times with exponential back-off so
+ * transient facilitator outages don't crash the server on startup.
  */
+const MAX_RETRIES = 3;
+const INITIAL_BACKOFF_MS = 2000;
+
 async function fetchFacilitatorFeePayer(network: string): Promise<string> {
-  const supportedUrl = `${FACILITATOR_URL}/supported`;
-  const authHeaders = await getCdpAuthHeaders("GET", supportedUrl);
-  const res = await fetch(supportedUrl, {
-    headers: { ...authHeaders },
-  });
-  if (!res.ok) {
-    throw new Error(
-      `Failed to fetch facilitator /supported (${res.status}): ${res.statusText}`,
-    );
-  }
+  let lastError: Error | undefined;
 
-  const data = (await res.json()) as {
-    kinds: Array<{
-      scheme: string;
-      network: string;
-      extra?: { feePayer?: string };
-    }>;
-    signers?: Record<string, string[]>;
-  };
-
-  // Try to find an exact match for the configured network in the supported kinds.
-  for (const kind of data.kinds) {
-    if (kind.network === network && kind.extra?.feePayer) {
-      return kind.extra.feePayer;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      const delayMs = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+      console.log(
+        `Retrying facilitator /supported (attempt ${attempt + 1}/${MAX_RETRIES + 1}) in ${delayMs}ms...`,
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
     }
-  }
 
-  // Fall back to the wildcard signer list (e.g., "solana:*").
-  if (data.signers) {
-    for (const [pattern, addresses] of Object.entries(data.signers)) {
-      if (pattern.endsWith(":*") && network.startsWith(pattern.slice(0, -2))) {
-        if (addresses.length > 0) {
-          return addresses[0];
+    try {
+      const supportedUrl = `${FACILITATOR_URL}/supported`;
+      const authHeaders = await getCdpAuthHeaders("GET", supportedUrl);
+      const res = await fetch(supportedUrl, {
+        headers: { ...authHeaders },
+      });
+      if (!res.ok) {
+        throw new Error(
+          `Failed to fetch facilitator /supported (${res.status}): ${res.statusText}`,
+        );
+      }
+
+      const data = (await res.json()) as {
+        kinds: Array<{
+          scheme: string;
+          network: string;
+          extra?: { feePayer?: string };
+        }>;
+        signers?: Record<string, string[]>;
+      };
+
+      // Try to find an exact match for the configured network in the supported kinds.
+      for (const kind of data.kinds) {
+        if (kind.network === network && kind.extra?.feePayer) {
+          return kind.extra.feePayer;
         }
+      }
+
+      // Fall back to the wildcard signer list (e.g., "solana:*").
+      if (data.signers) {
+        for (const [pattern, addresses] of Object.entries(data.signers)) {
+          if (
+            pattern.endsWith(":*") &&
+            network.startsWith(pattern.slice(0, -2))
+          ) {
+            if (addresses.length > 0) {
+              return addresses[0];
+            }
+          }
+        }
+      }
+
+      // No match is a permanent config error — don't retry.
+      throw new Error(
+        `Facilitator does not list a feePayer for network "${network}". ` +
+          `Check SERVER_SOLANA_NETWORK and X402_FACILITATOR_URL.`,
+      );
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      // Config errors (no matching network) should not be retried.
+      if (lastError.message.includes("does not list a feePayer")) {
+        throw lastError;
       }
     }
   }
 
   throw new Error(
-    `Facilitator does not list a feePayer for network "${network}". ` +
-      `Check SERVER_SOLANA_NETWORK and X402_FACILITATOR_URL.`,
+    `Failed to reach facilitator after ${MAX_RETRIES + 1} attempts: ${lastError?.message}`,
   );
 }
 

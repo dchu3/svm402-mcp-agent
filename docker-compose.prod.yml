@@ -36,7 +36,7 @@ services:
     expose:
       - "8080"
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -57,17 +57,19 @@ services:
     environment:
       PYTHON_API_URL: http://api-service:8080
       SERVER_PORT: 4022
+      # Write audit log to tmpfs since the root filesystem is read-only.
+      X402_AUDIT_LOG_PATH: /tmp/x402-audit.log
     depends_on:
       api-service:
         condition: service_healthy
     expose:
       - "4022"
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:4022/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:4022/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 30s
     networks:
       - x402-net
     security_opt:
