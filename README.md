@@ -173,6 +173,7 @@ curl -X POST https://svm402.com/mcp \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"So11111111111111111111111111111111111111112"}},"id":1}'
 ```
 
+
 ## Architecture
 
 ```

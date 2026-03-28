@@ -79,6 +79,9 @@ interface CachedBalance {
 const balanceCache = new Map<string, CachedBalance>();
 const BALANCE_CACHE_TTL_MS = 60_000; // 60 seconds
 
+// --- Coalesce pending balance RPC calls to prevent thundering herd ---
+const pendingFetches = new Map<string, Promise<{ sol_balance: number; usdc_balance: number }>>();
+
 // --- Per-IP rate limiting for free tools (manual) ---
 interface IpUsage {
   count: number;
@@ -87,6 +90,17 @@ interface IpUsage {
 const freeToolIpLimits = new Map<string, IpUsage>();
 const FREE_TOOL_MAX_PER_WINDOW = 10;
 const FREE_TOOL_WINDOW_MS = 60_000; // 1 minute
+
+// Periodically prune expired entries to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of balanceCache.entries()) {
+    if (now >= val.expiresAt) balanceCache.delete(key);
+  }
+  for (const [key, val] of freeToolIpLimits.entries()) {
+    if (now >= val.resetAt) freeToolIpLimits.delete(key);
+  }
+}, 300_000); // Every 5 minutes
 
 function parseTimeoutMs(
   rawValue: string | undefined,
@@ -473,49 +487,63 @@ export function makeMcpServer(
       }
 
       try {
-        // Fetch SOL balance (returns { value: lamports })
-        const solResponse = await solanaRpc<{ value: number }>("getBalance", [
-          trimmedAddress,
-          { commitment: "confirmed" },
-        ]);
-        const solBalance = solResponse.value / 1e9;
+        // --- Thundering herd check: coalesce pending RPC calls ---
+        let balanceData;
+        const pending = pendingFetches.get(trimmedAddress);
+        if (pending) {
+          balanceData = await pending;
+        } else {
+          const fetchPromise = (async () => {
+            // Fetch SOL balance (returns { value: lamports })
+            const solResponse = await solanaRpc<{ value: number }>("getBalance", [
+              trimmedAddress,
+              { commitment: "confirmed" },
+            ]);
+            const sol = solResponse.value / 1e9;
 
-        // Fetch USDC token accounts for this wallet
-        let usdcBalance = 0;
-        try {
-          const tokenAccounts = await solanaRpc<{
-            value: Array<{
-              account: {
-                data: { parsed: { info: { tokenAmount: { uiAmount: number } } } };
-              };
-            }>;
-          }>("getTokenAccountsByOwner", [
-            trimmedAddress,
-            { mint: usdcMint },
-            { encoding: "jsonParsed", commitment: "confirmed" },
-          ]);
-          for (const acc of tokenAccounts.value) {
-            usdcBalance +=
-              acc.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+            // Fetch USDC token accounts for this wallet
+            let usdc = 0;
+            try {
+              const tokenAccounts = await solanaRpc<{
+                value: Array<{
+                  account: {
+                    data: { parsed: { info: { tokenAmount: { uiAmount: number } } } };
+                  };
+                }>;
+              }>("getTokenAccountsByOwner", [
+                trimmedAddress,
+                { mint: usdcMint },
+                { encoding: "jsonParsed", commitment: "confirmed" },
+              ]);
+              for (const acc of tokenAccounts.value) {
+                usdc += acc.account.data.parsed.info.tokenAmount.uiAmount ?? 0;
+              }
+            } catch {
+              // No USDC accounts — balance stays 0
+            }
+            return { sol_balance: sol, usdc_balance: usdc };
+          })();
+
+          pendingFetches.set(trimmedAddress, fetchPromise);
+          try {
+            balanceData = await fetchPromise;
+            // --- Update cache ---
+            balanceCache.set(trimmedAddress, {
+              ...balanceData,
+              expiresAt: Date.now() + BALANCE_CACHE_TTL_MS,
+            });
+          } finally {
+            pendingFetches.delete(trimmedAddress);
           }
-        } catch {
-          // No USDC accounts — balance stays 0
         }
 
         const result = {
           address: trimmedAddress,
-          sol_balance: solBalance,
-          usdc_balance: usdcBalance,
+          sol_balance: balanceData.sol_balance,
+          usdc_balance: balanceData.usdc_balance,
           analysis_price_usdc: analysisPriceUsdc,
-          can_afford_analysis: usdcBalance >= analysisPriceUsdc,
+          can_afford_analysis: balanceData.usdc_balance >= analysisPriceUsdc,
         };
-
-        // --- Update cache ---
-        balanceCache.set(trimmedAddress, {
-          sol_balance: solBalance,
-          usdc_balance: usdcBalance,
-          expiresAt: Date.now() + BALANCE_CACHE_TTL_MS,
-        });
 
         return {
           content: [{ type: "text", text: JSON.stringify(result) }],
