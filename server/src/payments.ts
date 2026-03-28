@@ -132,10 +132,10 @@ export function toUsdcMicrounits(priceStr: string): bigint {
  * Retries up to {@link MAX_RETRIES} times with exponential back-off so
  * transient facilitator outages don't crash the server on startup.
  */
-const MAX_RETRIES = 3;
-const INITIAL_BACKOFF_MS = 2000;
+export const MAX_RETRIES = 3;
+export const INITIAL_BACKOFF_MS = 2000;
 
-async function fetchFacilitatorFeePayer(network: string): Promise<string> {
+export async function fetchFacilitatorFeePayer(network: string): Promise<string> {
   let lastError: Error | undefined;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -152,6 +152,7 @@ async function fetchFacilitatorFeePayer(network: string): Promise<string> {
       const authHeaders = await getCdpAuthHeaders("GET", supportedUrl);
       const res = await fetch(supportedUrl, {
         headers: { ...authHeaders },
+        signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) {
         throw new Error(
