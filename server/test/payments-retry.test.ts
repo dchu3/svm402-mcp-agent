@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fetchFacilitatorFeePayer, MAX_RETRIES } from "../src/payments.js";
+import { getCdpAuthHeaders } from "../src/cdp-auth.js";
+
+vi.mock("../src/cdp-auth.js", () => ({
+  getCdpAuthHeaders: vi.fn().mockResolvedValue({}),
+}));
 
 describe("fetchFacilitatorFeePayer retry and timeout", () => {
   beforeEach(() => {
@@ -125,17 +130,14 @@ describe("fetchFacilitatorFeePayer retry and timeout", () => {
 
   it("retries on actual fetch timeout", async () => {
     // 1st attempt: Timeout
-    // We mock fetch to never resolve, then advance timers by 10s
     vi.mocked(fetch).mockImplementationOnce(() => {
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                const err = new Error("The operation was aborted");
-                err.name = "AbortError";
-                reject(err);
-            }, 10000);
-            // Clean up if actually called (not strictly necessary for mock but good practice)
-            return () => clearTimeout(timeout);
-        });
+      return new Promise((resolve, reject) => {
+        setTimeout(() => {
+          const err = new Error("The operation was aborted");
+          err.name = "AbortError";
+          reject(err);
+        }, 10000);
+      });
     });
     
     // 2nd attempt: Success
@@ -158,5 +160,17 @@ describe("fetchFacilitatorFeePayer retry and timeout", () => {
     const result = await promise;
     expect(result).toBe("payer123");
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails fast on CDP auth header generation error", async () => {
+    vi.mocked(getCdpAuthHeaders).mockRejectedValueOnce(
+      new Error("Invalid API key")
+    );
+
+    const promise = fetchFacilitatorFeePayer("solana:mainnet").catch((err) => err);
+    const error = await promise;
+    expect(error.name).toBe("PermanentConfigError");
+    expect(error.message).toMatch(/CDP authentication headers/);
+    expect(fetch).not.toHaveBeenCalled();
   });
 });

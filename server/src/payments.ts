@@ -156,7 +156,15 @@ export async function fetchFacilitatorFeePayer(network: string): Promise<string>
 
     try {
       const supportedUrl = `${FACILITATOR_URL}/supported`;
-      const authHeaders = await getCdpAuthHeaders("GET", supportedUrl);
+      let authHeaders: Record<string, string>;
+      try {
+        authHeaders = await getCdpAuthHeaders("GET", supportedUrl);
+      } catch (err) {
+        throw new PermanentConfigError(
+          `Failed to generate CDP authentication headers: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       const res = await fetch(supportedUrl, {
         headers: { ...authHeaders },
         signal: AbortSignal.timeout(10000),
