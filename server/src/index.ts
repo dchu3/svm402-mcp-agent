@@ -479,19 +479,23 @@ export function makeMcpServer(
 
       // --- Cache check ---
       const cached = balanceCache.get(trimmedAddress);
-      if (cached && Date.now() < cached.expiresAt) {
-        const result = {
-          address: trimmedAddress,
-          sol_balance: cached.sol_balance,
-          usdc_balance: cached.usdc_balance,
-          analysis_price_usdc: analysisPriceUsdc,
-          can_afford_analysis: cached.usdc_balance >= analysisPriceUsdc,
-          _cached: true,
-        };
-        return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          structuredContent: result,
-        };
+      if (cached) {
+        if (Date.now() < cached.expiresAt) {
+          const result = {
+            address: trimmedAddress,
+            sol_balance: cached.sol_balance,
+            usdc_balance: cached.usdc_balance,
+            analysis_price_usdc: analysisPriceUsdc,
+            can_afford_analysis: cached.usdc_balance >= analysisPriceUsdc,
+            _cached: true,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            structuredContent: result,
+          };
+        }
+        // Entry is expired; remove it so the cache doesn't retain stale addresses.
+        balanceCache.delete(trimmedAddress);
       }
 
       try {
@@ -582,8 +586,11 @@ async function main(): Promise<void> {
   const analysisPriceMicrounits = paymentConfig.accepts[0].amount;
   const app = express();
 
-  // Trust proxy (for correct client IP behind Caddy/nginx)
-  app.set("trust proxy", 1);
+  // Trust proxy (for correct client IP behind Caddy/nginx).
+  // Only enable if specifically requested via config to prevent IP spoofing.
+  if (process.env.SERVER_TRUST_PROXY === "true" || process.env.SERVER_TRUST_PROXY === "1") {
+    app.set("trust proxy", 1);
+  }
 
   // Security middleware
   app.use(requestId);
@@ -889,7 +896,7 @@ async function main(): Promise<void> {
   // Global error handler (must be registered last)
   app.use(globalErrorHandler);
 
-  app.listen(SERVER_PORT, "0.0.0.0", () => {
+  app.listen(SERVER_PORT, () => {
     console.log(`DEX Analysis MCP server listening on port ${SERVER_PORT}`);
     console.log(
       `Tool calls require USDC payment via x402 (facilitator: ${FACILITATOR_URL})`
