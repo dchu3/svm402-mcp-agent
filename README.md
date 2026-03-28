@@ -116,6 +116,30 @@ The x402 MCP endpoint (`POST /mcp`) returns a structured JSON report designed fo
 
 The `get_wallet_balance` tool lets clients verify they have sufficient USDC before paying for analysis.
 
+## Production Deployment
+
+### 1. Security Setup
+
+Generate and set `INTERNAL_API_SECRET` to prevent direct `/analyze` bypass (ensuring all analysis requests are paid via x402):
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+# Copy the output into .env as INTERNAL_API_SECRET=<value>
+```
+
+### 2. Deploy with Caddy (Automatic HTTPS)
+
+The production configuration uses Caddy to handle SSL/TLS termination and reverse proxying.
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
+```
+
+This starts three services:
+- **Caddy** — Reverse proxy on ports 80/443, auto-provisions Let's Encrypt TLS certificates.
+- **analysis-server** — Express.js MCP server (internal only, not directly exposed).
+- **api-service** — FastAPI Python backend (internal only).
+
 #### Connecting from an MCP Client
 
 The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compatible client can connect to it by pointing at the server URL.
