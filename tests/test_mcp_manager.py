@@ -131,73 +131,6 @@ def test_truncate_description_at_word_boundary():
     assert result in ["This is a test description...", "This is a test..."]
 
 
-def test_mcp_manager_with_trader():
-    """Test MCPManager initializes trader client when cmd is provided."""
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="echo trader",
-    )
-
-    assert manager.trader is not None
-    assert manager.trader.name == "trader"
-
-
-def test_mcp_manager_forwards_trader_extra_env():
-    """MCPManager passes trader_env through to trader client extra_env."""
-    trader_env = {
-        "SOLANA_PRIVATE_KEY": "test-private-key",
-        "SOLANA_RPC_URL": "https://rpc.example",
-        "JUPITER_API_BASE": "https://api.jup.ag/swap/v1",
-        "JUPITER_API_KEY": "test-jupiter-key",
-    }
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="echo trader",
-        trader_env=trader_env,
-    )
-
-    assert manager.trader is not None
-    assert manager.trader._extra_env == trader_env
-
-
-def test_mcp_manager_without_trader():
-    """Test MCPManager skips trader client when cmd is empty."""
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="",
-    )
-
-    assert manager.trader is None
-
-
-def test_mcp_manager_get_client_trader():
-    """Test get_client returns trader when configured."""
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="echo trader",
-    )
-
-    client = manager.get_client("trader")
-    assert client is not None
-    assert client.name == "trader"
-
-
-def test_mcp_manager_get_client_without_trader():
-    """Test get_client returns None when trader is not configured."""
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="",
-    )
-
-    client = manager.get_client("trader")
-    assert client is None
-
-
 # ---------------------------------------------------------------------------
 # get_gemini_functions_for — filtered tool getter
 # ---------------------------------------------------------------------------
@@ -209,7 +142,6 @@ def _manager_with_tools() -> MCPManager:
         dexscreener_cmd="echo dexscreener",
         dexpaprika_cmd="echo dexpaprika",
         rugcheck_cmd="echo rugcheck",
-        trader_cmd="echo trader",
     )
     manager.dexscreener._tools = [
         {
@@ -232,13 +164,6 @@ def _manager_with_tools() -> MCPManager:
             "inputSchema": {"type": "object", "properties": {"token_address": {"type": "string"}}, "required": ["token_address"]},
         }
     ]
-    manager.trader._tools = [
-        {
-            "name": "execute_trade",
-            "description": "Execute trade",
-            "inputSchema": {"type": "object", "properties": {}, "required": []},
-        }
-    ]
     return manager
 
 
@@ -249,9 +174,8 @@ def test_get_gemini_functions_for_returns_only_requested_clients():
     names = [f.name for f in functions]
     assert "dexscreener_search_pairs" in names
     assert "rugcheck_get_token_summary" in names
-    # dexpaprika and trader must be excluded
+    # dexpaprika must be excluded
     assert not any("dexpaprika" in n for n in names)
-    assert not any("trader" in n for n in names)
 
 
 def test_get_gemini_functions_for_unknown_name_skipped():
@@ -444,7 +368,6 @@ def test_mcp_manager_call_timeout_applied_to_all_clients():
         dexpaprika_cmd="echo dexpaprika",
         rugcheck_cmd="echo rugcheck",
         solana_rpc_cmd="echo solana",
-        trader_cmd="echo trader",
         call_timeout=120.0,
     )
 
@@ -453,7 +376,6 @@ def test_mcp_manager_call_timeout_applied_to_all_clients():
         manager.dexpaprika,
         manager.rugcheck,
         manager.solana,
-        manager.trader,
     ]
     for client in clients:
         assert client is not None
@@ -491,18 +413,7 @@ async def test_mcp_client_start_passes_merged_extra_env():
     assert kwargs["env"]["SOLANA_RPC_URL"] == "https://rpc.example"
 
 
-def test_mcp_manager_trader_retry_on_timeout_disabled():
-    """MCPManager creates the trader client with retry_on_timeout=False to prevent double trades."""
-    manager = MCPManager(
-        dexscreener_cmd="echo dexscreener",
-        dexpaprika_cmd="echo dexpaprika",
-        trader_cmd="echo trader",
-    )
-    assert manager.trader is not None
-    assert manager.trader._retry_on_timeout is False
-
-
-def test_mcp_manager_non_trader_clients_retry_on_timeout_enabled():
+def test_mcp_manager_clients_retry_on_timeout_enabled():
     """Non-trader MCP clients retain the default retry_on_timeout=True."""
     manager = MCPManager(
         dexscreener_cmd="echo dexscreener",
@@ -540,11 +451,10 @@ def test_mcp_manager_propagates_max_concurrent():
         dexscreener_cmd="echo dexscreener",
         dexpaprika_cmd="echo dexpaprika",
         rugcheck_cmd="echo rugcheck",
-        trader_cmd="echo trader",
         max_concurrent_per_server=5,
     )
 
-    for client in [manager.dexscreener, manager.dexpaprika, manager.rugcheck, manager.trader]:
+    for client in [manager.dexscreener, manager.dexpaprika, manager.rugcheck]:
         assert client is not None
         assert client._call_semaphore._value == 5
 

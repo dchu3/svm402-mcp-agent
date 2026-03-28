@@ -302,7 +302,6 @@ class TestTokenAnalyzer:
             assert report.structured.token == "PEPE"
             assert report.structured.safety["status"] == "safe"
             assert report.structured.verdict["action"] == "buy"
-            assert "Token Analysis Report" in report.telegram_message
 
     @pytest.mark.asyncio
     async def test_analyze_solana_token(self, mock_mcp_manager):
@@ -432,28 +431,10 @@ class TestTokenAnalyzer:
                 "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
                 "solana",
                 structured=True,
-                legacy_output=False,
             )
 
             assert report.structured is not None
-            assert report.ai_analysis == ""
-            assert report.telegram_message == report.structured.human_readable
-            assert report.tweet_message == "Solid token for structured consumers."
             assert mock_client.models.generate_content.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_analyze_raises_when_both_outputs_disabled(self, mock_mcp_manager):
-        """Both structured=False and legacy_output=False should raise ValueError."""
-        with patch("app.token_analyzer.genai"):
-            analyzer = TokenAnalyzer(api_key="test-key", mcp_manager=mock_mcp_manager)
-
-        with pytest.raises(ValueError, match="At least one"):
-            await analyzer.analyze(
-                "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-                "solana",
-                structured=False,
-                legacy_output=False,
-            )
 
     def test_extract_solana_ui_amount_precision(self, mock_mcp_manager):
         """Decimal math should handle large Solana balances without float precision loss."""
@@ -566,108 +547,6 @@ class TestTokenAnalyzer:
                 "solana",
             )
             assert any("Invalid pair data" in e for e in report.token_data.errors)
-
-
-class TestTelegramReportFormatting:
-    """Tests for Telegram report formatting."""
-
-    def test_format_telegram_report_structure(self):
-        """Test that Telegram report has expected structure."""
-        token_data = TokenData(
-            address="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-            chain="solana",
-            symbol="BONK",
-            name="Bonk",
-            price_usd=0.00001234,
-            price_change_24h=5.5,
-            volume_24h=1000000,
-            liquidity_usd=5000000,
-            market_cap=5000000000,
-            safety_status="Safe",
-            pools=[{"dex": "raydium", "liquidity": 3000000}],
-        )
-        
-        with patch("app.token_analyzer.genai"):
-            analyzer = TokenAnalyzer(
-                api_key="test-key",
-                mcp_manager=MagicMock(),
-            )
-            
-            report = analyzer._format_telegram_report(token_data, "AI analysis here")
-            
-            # Check expected sections
-            assert "Token Analysis Report" in report
-            assert "BONK" in report
-            assert "Solana" in report
-            assert "Price &amp; Market" in report
-            assert "Liquidity" in report
-            assert "Safety Check" in report
-            assert "AI Analysis" in report
-            assert "✅ Safe" in report
-            assert "AI analysis here" in report
-
-    def test_format_tweet_report_structure(self):
-        """Test that tweet report has expected concise structure."""
-        token_data = TokenData(
-            address="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-            chain="solana",
-            symbol="BONK",
-            name="Bonk",
-            price_usd=0.00001234,
-            price_change_24h=5.5,
-            volume_24h=1000000,
-            liquidity_usd=5000000,
-            market_cap=5000000000,
-            safety_status="Safe",
-            pools=[{"dex": "raydium", "pair": "So1anapair", "liquidity": 3000000}],
-        )
-        
-        with patch("app.token_analyzer.genai"):
-            analyzer = TokenAnalyzer(
-                api_key="test-key",
-                mcp_manager=MagicMock(),
-            )
-            
-            report = analyzer._format_tweet_report(token_data, "Looks solid.")
-            
-            assert "BONK" in report
-            assert "Solana" in report
-            assert "✅ Safe" in report
-            assert "Looks solid." in report
-            assert "+5.50%" in report
-            # Should NOT contain detailed sections
-            assert "Token Analysis Report" not in report
-            assert "Liquidity" not in report
-            assert "AI Analysis" not in report
-
-    def test_format_tweet_report_length(self):
-        """Test that tweet report stays concise."""
-        token_data = TokenData(
-            address="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
-            chain="solana",
-            symbol="BONK",
-            name="Bonk",
-            price_usd=0.00001234,
-            price_change_24h=-12.3,
-            market_cap=5000000000,
-            safety_status="Risky",
-            pools=[{"dex": "raydium", "pair": "So1anapair", "liquidity": 3000000}],
-        )
-        
-        with patch("app.token_analyzer.genai"):
-            analyzer = TokenAnalyzer(
-                api_key="test-key",
-                mcp_manager=MagicMock(),
-            )
-            
-            report = analyzer._format_tweet_report(token_data, "High sell tax detected.")
-            
-            # Should be under 500 chars (excluding HTML tags)
-            import re
-            plain_text = re.sub(r"<[^>]+>", "", report)
-            assert len(plain_text) < 500
-            assert "🔴" in report
-            assert "⚠️" in report
 
 
 class TestRugcheckResultHandling:

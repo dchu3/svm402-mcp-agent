@@ -215,7 +215,6 @@ async def analyze_token(request: AnalyzeRequest, http_request: Request) -> Analy
             address,
             normalized_chain,
             structured=True,
-            legacy_output=False,
         )
     except Exception as exc:
         duration_ms = int((time.monotonic() - start_time) * 1000)

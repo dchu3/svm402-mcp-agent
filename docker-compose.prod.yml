@@ -1,29 +1,22 @@
-# Production deployment for the paid analysis MCP server.
-# Usage: docker compose -f docker-compose.prod.yml up -d
-#
-# Requires:
-#   - .env file with all required variables (see .env.production.example)
-#   - DOMAIN env var set to your public domain (e.g. api.example.com)
-
 services:
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.7.6-alpine
     restart: unless-stopped
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
-    environment:
-      DOMAIN: ${DOMAIN:?DOMAIN environment variable is required}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN:?DOMAIN environment variable is required}
     depends_on:
       analysis-server:
         condition: service_healthy
     networks:
-      - dex-net
+      - x402-net
     security_opt:
       - no-new-privileges:true
     mem_limit: 256m
@@ -31,7 +24,6 @@ services:
 
   api-service:
     build: .
-    command: ["--http-api"]
     restart: unless-stopped
     env_file:
       - .env
@@ -40,8 +32,7 @@ services:
       MCP_DEXPAPRIKA_CMD: dexpaprika-mcp
       MCP_RUGCHECK_CMD: node /opt/mcp/dex-rugcheck-mcp/dist/index.js
       MCP_SOLANA_RPC_CMD: node /opt/mcp/solana-rpc-mcp/dist/index.js
-    volumes:
-      - dex-bot-data:/home/botuser/.dex-bot
+    command: ["--http-api"]
     expose:
       - "8080"
     healthcheck:
@@ -51,7 +42,7 @@ services:
       retries: 3
       start_period: 30s
     networks:
-      - dex-net
+      - x402-net
     security_opt:
       - no-new-privileges:true
     mem_limit: 2g
@@ -65,6 +56,10 @@ services:
       - .env
     environment:
       PYTHON_API_URL: http://api-service:8080
+      SERVER_PORT: 4022
+    depends_on:
+      api-service:
+        condition: service_healthy
     expose:
       - "4022"
     healthcheck:
@@ -73,11 +68,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
-    depends_on:
-      api-service:
-        condition: service_healthy
     networks:
-      - dex-net
+      - x402-net
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -87,10 +79,9 @@ services:
     cpus: 1
 
 volumes:
-  dex-bot-data:
-  caddy-data:
-  caddy-config:
+  caddy_data:
+  caddy_config:
 
 networks:
-  dex-net:
-    name: dex-net
+  x402-net:
+    name: x402-net

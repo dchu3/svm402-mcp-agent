@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List
 
 # Maximum characters for tool result payloads sent to the LLM context.
-# Used by both AgenticPlanner and PortfolioDiscovery decision loops.
+# Used by AgenticPlanner decision loops.
 MAX_TOOL_RESULT_CHARS = 8000
 
 
