@@ -145,7 +145,7 @@ This starts three services:
 The analysis server uses **StreamableHTTP** transport at `/mcp`. Any MCP-compatible client can connect to it by pointing at the server URL.
 
 > [!NOTE]
-> Standard MCP clients (like Gemini CLI or Claude Desktop) do not natively support x402 payments. They can be used to call free tools like `get_wallet_balance`, but will receive a `402 Payment Required` error when calling `analyze_token`. See [server/README.md](server/README.md) for examples of payment-enabled clients.
+> Standard MCP clients (like Gemini CLI or Claude Desktop) do not natively support x402 payments. They can be used to call free tools like `get_wallet_balance`, but will receive a `402 Payment Required` error when calling `analyze_token`. For Gemini CLI users, the **[svm402-gemini-extension](https://github.com/dchu3/svm402-gemini-extension)** automatically handles these payments. See [server/README.md](server/README.md) for other payment-enabled client examples.
 
 **Quick Test (Free Tool)** — verify the connection using `curl`:
 
@@ -154,6 +154,14 @@ curl -X POST https://svm402.com/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get_wallet_balance","arguments":{"address":"<WALLET_ADDRESS>"}},"id":1}'
+```
+
+### Gemini CLI Extension (Recommended)
+
+To use this server directly from your [Gemini CLI](https://github.com/google/gemini-cli) with automatic x402 payment handling:
+
+```bash
+gemini extensions install https://github.com/dchu3/svm402-gemini-extension
 ```
 
 
