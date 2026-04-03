@@ -282,7 +282,7 @@ class TestDetectPatterns:
         result = self.detector._detect_patterns(swaps, 30)
         assert result.manipulation_score is not None
         # 1 wallet buying 3 times: repeat buyer ratio 3/3=1.0 (3pt) + max buys 3 (1.5pt)
-        # + low diversity 1/3 (2pt) + buy asymmetry 3/3=100% (1.5pt) = 8.0 → suspicious
+        # + diversity 1/3=0.33 hits <0.5 branch (1pt) + buy asymmetry 3/3=100% (1.5pt) = 7.0 → suspicious
         assert result.manipulation_level in ("suspicious", "critical")
         assert result.unique_wallets == 1
 
