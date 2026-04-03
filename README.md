@@ -18,6 +18,7 @@ An AI-powered CLI and API server for token safety checks and market analysis. Us
 - 🔍 **AI Token Analysis** — Send a token address, get a detailed safety & market report.
 - 🛡️ **Safety Checks** — Rugcheck token safety analysis (Solana).
 - 📊 **Market Data** — Price, volume, liquidity, market cap via DexScreener & DexPaprika.
+- 🚨 **Wash Trading Detection** — Scans recent pool transactions to detect repeat-buyer wallets, coordinated manipulation, and potential rug pull accumulation patterns. Generates a 0–10 manipulation score.
 - 🤖 **Gemini AI** — Natural language queries, intelligent tool selection, risk assessment.
 - 💳 **x402 Paid API** — Built-in Express.js API server for paid analysis via the x402 v2 protocol.
 
@@ -192,6 +193,36 @@ gemini extensions install https://github.com/dchu3/svm402-gemini-extension
 DexScreener DexPap Rugcheck Solana
   (price)  (pools) (safety)  (RPC)
 ```
+
+## Analysis Output
+
+The `analyze_token` tool returns a structured JSON report with the following sections:
+
+| Section | Description |
+|---------|-------------|
+| `price_data` | Current price, 24h change, market cap, volume, FDV |
+| `liquidity` | Total liquidity, top pool, LP locked percentage |
+| `safety` | Rugcheck status, risk score (0–10), risk level, safety flags |
+| `holder_snapshot` | Top-10 holder concentration and risk level |
+| `wash_trading` | Manipulation detection: score (0–10), repeat buyers, flags |
+| `ai_analysis` | AI-generated strengths, risks, whale signal, narrative momentum |
+| `verdict` | Recommended action, confidence level, one-sentence summary |
+| `human_readable` | Formatted text summary with emojis |
+
+### Wash Trading Detection
+
+The wash trading analyzer scans recent transactions on the token's primary DEX pool to detect manipulation patterns:
+
+- **Repeat buyers** — Wallets making multiple purchases of the same token
+- **Low wallet diversity** — Few unique wallets relative to total transactions
+- **Buy/sell asymmetry** — Extreme buy pressure suggesting accumulation before dump
+- **Rapid trading** — Same wallet making many trades in a short time window
+
+The `manipulation_score` ranges from 0 (clean) to 10 (critical manipulation). Levels:
+- `clean` (0–2): Normal trading patterns
+- `moderate` (3–5): Some concerning signals
+- `suspicious` (6–8): Likely manipulation
+- `critical` (9–10): Strong wash trading indicators
 
 ## Prerequisites
 
