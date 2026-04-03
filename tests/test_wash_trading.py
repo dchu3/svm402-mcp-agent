@@ -258,16 +258,64 @@ class TestDetectPatterns:
         assert result.manipulation_level == "unknown"
         assert result.manipulation_score is None
 
-    def test_small_sample_returns_unknown(self):
-        """Fewer than MIN_SAMPLE_SIZE swaps returns unknown instead of scoring."""
+    def test_small_sample_gets_scored_with_flag(self):
+        """Fewer than MIN_SAMPLE_SIZE swaps still get scored but flagged."""
         swaps = [
             ParsedSwap(f"sig{i}", "SameWallet", "buy", 100.0)
             for i in range(MIN_SAMPLE_SIZE - 1)
         ]
         result = self.detector._detect_patterns(swaps, 30)
-        assert result.manipulation_level == "unknown"
-        assert result.manipulation_score is None
+        # Should be scored, not "unknown"
+        assert result.manipulation_score is not None
+        assert result.manipulation_level != "unknown"
         assert result.total_transactions_sampled == 30
+        # Should have low sample size flag
+        has_low_sample_flag = any("low sample size" in f.lower() for f in result.flags)
+        assert has_low_sample_flag
+
+    def test_small_sample_one_wallet_all_buys_suspicious(self):
+        """3 buys from 1 wallet should score as suspicious, not unknown."""
+        swaps = [
+            ParsedSwap(f"sig{i}", "SameWallet", "buy", 100.0)
+            for i in range(3)
+        ]
+        result = self.detector._detect_patterns(swaps, 30)
+        assert result.manipulation_score is not None
+        # 1 wallet buying 3 times: repeat buyer ratio 3/3=1.0 (3pt) + max buys 3 (1.5pt)
+        # + diversity 1/3=0.33 hits <0.5 branch (1pt) + buy asymmetry 3/3=100% (1.5pt) = 7.0 → suspicious
+        assert result.manipulation_level in ("suspicious", "critical")
+        assert result.unique_wallets == 1
+
+    def test_single_swap_gets_scored(self):
+        """Even 1 swap should get a score (likely low) with low_sample_size flag."""
+        swaps = [ParsedSwap("sig0", "OnlyWallet", "buy", 50.0)]
+        result = self.detector._detect_patterns(swaps, 30)
+        assert result.manipulation_score is not None
+        assert result.manipulation_level != "unknown"
+        has_low_sample_flag = any("low sample size" in f.lower() for f in result.flags)
+        assert has_low_sample_flag
+
+    def test_low_parse_rate_flag(self):
+        """Flag when <20% of sampled transactions parsed as swaps."""
+        swaps = [
+            ParsedSwap(f"sig{i}", f"W{i}", "buy", 100.0)
+            for i in range(5)
+        ]
+        # 5 swaps from 30 sampled = 16.7% < 20%
+        result = self.detector._detect_patterns(swaps, 30)
+        has_parse_rate_flag = any("parse rate" in f.lower() for f in result.flags)
+        assert has_parse_rate_flag
+
+    def test_no_low_parse_rate_flag_when_rate_adequate(self):
+        """No parse rate flag when ≥20% of transactions parsed."""
+        swaps = [
+            ParsedSwap(f"sig{i}", f"W{i}", "buy", 100.0)
+            for i in range(8)
+        ]
+        # 8 swaps from 10 sampled = 80% ≥ 20%
+        result = self.detector._detect_patterns(swaps, 10)
+        has_parse_rate_flag = any("parse rate" in f.lower() for f in result.flags)
+        assert not has_parse_rate_flag
 
     def test_buy_sell_asymmetry_flag(self):
         """Flag when almost all activity is buys."""
