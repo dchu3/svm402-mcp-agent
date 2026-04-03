@@ -488,10 +488,8 @@ class WashTradingDetector:
         self, swaps: List[ParsedSwap], total_sampled: int
     ) -> WashTradingResult:
         """Analyze swap list for wash trading patterns and generate a score."""
-        # Insufficient data to score reliably
-        if len(swaps) < MIN_SAMPLE_SIZE:
+        if not swaps:
             return WashTradingResult(
-                unique_wallets=len(set(s.wallet for s in swaps)),
                 total_transactions_sampled=total_sampled,
                 manipulation_level="unknown",
             )
@@ -537,6 +535,16 @@ class WashTradingDetector:
         total_swaps = len(swaps)
         buy_count = sum(1 for s in swaps if s.direction == "buy")
         sell_count = total_swaps - buy_count
+
+        # Confidence flags
+        if total_swaps < MIN_SAMPLE_SIZE:
+            result.flags.append(
+                f"Low sample size: {total_swaps} swaps parsed from {total_sampled} sampled transactions"
+            )
+        if total_sampled > 0 and total_swaps / total_sampled < 0.2:
+            result.flags.append(
+                f"Low parse rate: {total_swaps}/{total_sampled} transactions identified as swaps"
+            )
 
         # Identify repeat buyers
         repeat_buyers = [
@@ -596,7 +604,7 @@ class WashTradingDetector:
 
         # Factor 4: Buy/sell asymmetry (0-1.5 points)
         # Heavy buying with little selling suggests accumulation before dump
-        if total_swaps > 5:
+        if total_swaps > 2:
             buy_ratio = buy_count / total_swaps
             if buy_ratio > 0.85:
                 score += 1.5
