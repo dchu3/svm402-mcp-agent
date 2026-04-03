@@ -22,6 +22,10 @@ MAX_SIGNATURES = 100
 MAX_TX_SAMPLE = 30
 # Wallet must have >1 buy to count as a repeat buyer
 REPEAT_BUY_THRESHOLD = 2
+# Minimum successfully-parsed swaps required to produce a score
+MIN_SAMPLE_SIZE = 5
+# Limit concurrent RPC calls to avoid cascade MCP client failures
+RPC_CONCURRENCY_LIMIT = 3
 # SPL Token program IDs
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 SPL_TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
@@ -55,7 +59,7 @@ class WalletActivity:
 class WashTradingResult:
     """Result of wash trading / manipulation analysis."""
 
-    manipulation_score: float = 0.0  # 0-10 scale
+    manipulation_score: Optional[float] = None  # 0-10 scale, None = analysis unavailable
     manipulation_level: str = "unknown"  # clean, moderate, suspicious, critical
     unique_wallets: int = 0
     total_transactions_sampled: int = 0
@@ -65,7 +69,7 @@ class WashTradingResult:
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a JSON-serializable dictionary."""
         return {
-            "manipulation_score": round(self.manipulation_score, 1),
+            "manipulation_score": round(self.manipulation_score, 1) if self.manipulation_score is not None else None,
             "manipulation_level": self.manipulation_level,
             "unique_wallets": self.unique_wallets,
             "total_transactions_sampled": self.total_transactions_sampled,
@@ -189,21 +193,24 @@ class WashTradingDetector:
             return []
 
         async def fetch_one(sig: str) -> Optional[ParsedSwap]:
-            try:
-                result = await client.call_tool(
-                    "getTransaction",
-                    {"signature": sig, "maxSupportedTransactionVersion": 0},
-                )
-                if isinstance(result, str):
-                    try:
-                        result = json.loads(result)
-                    except (json.JSONDecodeError, ValueError):
-                        return None
-                if isinstance(result, dict):
-                    return self._parse_transaction(result, token_address, sig)
-            except Exception as e:
-                self._log("error", f"Failed to fetch tx {sig[:16]}...: {e}")
-            return None
+            async with semaphore:
+                try:
+                    result = await client.call_tool(
+                        "getTransaction",
+                        {"signature": sig, "maxSupportedTransactionVersion": 0},
+                    )
+                    if isinstance(result, str):
+                        try:
+                            result = json.loads(result)
+                        except (json.JSONDecodeError, ValueError):
+                            return None
+                    if isinstance(result, dict):
+                        return self._parse_transaction(result, token_address, sig)
+                except Exception as e:
+                    self._log("error", f"Failed to fetch tx {sig[:16]}...: {e}")
+                return None
+
+        semaphore = asyncio.Semaphore(RPC_CONCURRENCY_LIMIT)
 
         self._log(
             "tool",
@@ -257,6 +264,10 @@ class WashTradingDetector:
             return None
 
         block_time = tx_data.get("blockTime")
+
+        # Filter out non-swap transactions (e.g. LP adds/removes)
+        if not self._is_likely_swap(meta, fee_payer):
+            return None
 
         # Scan all token transfers (inner instructions + top-level)
         token_in = 0.0  # tokens flowing TO fee payer
@@ -414,10 +425,77 @@ class WashTradingDetector:
 
         return None
 
+    def _is_likely_swap(self, meta: Dict[str, Any], fee_payer: str) -> bool:
+        """Check if transaction is likely a swap vs LP add/remove.
+
+        Swaps produce mixed-direction balance changes across token mints
+        (one token in, another out). LP operations change all tokens in the
+        same direction. When only one mint appears in token balances, we
+        assume SOL is the other side (not tracked in token balances) and
+        treat it as a swap.
+        """
+        pre_balances = meta.get("preTokenBalances", [])
+        post_balances = meta.get("postTokenBalances", [])
+
+        pre_by_mint: Dict[str, float] = {}
+        post_by_mint: Dict[str, float] = {}
+
+        for bal in (pre_balances or []):
+            if not isinstance(bal, dict):
+                continue
+            owner = bal.get("owner")
+            if owner != fee_payer:
+                continue
+            mint = bal.get("mint", "")
+            amount = self._extract_ui_amount(bal)
+            if mint and amount is not None:
+                pre_by_mint[mint] = pre_by_mint.get(mint, 0.0) + amount
+
+        for bal in (post_balances or []):
+            if not isinstance(bal, dict):
+                continue
+            owner = bal.get("owner")
+            if owner != fee_payer:
+                continue
+            mint = bal.get("mint", "")
+            amount = self._extract_ui_amount(bal)
+            if mint and amount is not None:
+                post_by_mint[mint] = post_by_mint.get(mint, 0.0) + amount
+
+        all_mints = set(pre_by_mint.keys()) | set(post_by_mint.keys())
+        if len(all_mints) < 2:
+            # Single token mint — other side is likely SOL (native lamports)
+            return True
+
+        directions = []
+        for mint in all_mints:
+            pre = pre_by_mint.get(mint, 0.0)
+            post = post_by_mint.get(mint, 0.0)
+            net = post - pre
+            if abs(net) > 1e-9:
+                directions.append(net > 0)
+
+        if not directions:
+            return True
+
+        # All same direction → LP add (all negative) or LP remove (all positive)
+        if all(d == directions[0] for d in directions):
+            return False
+
+        return True
+
     def _detect_patterns(
         self, swaps: List[ParsedSwap], total_sampled: int
     ) -> WashTradingResult:
         """Analyze swap list for wash trading patterns and generate a score."""
+        # Insufficient data to score reliably
+        if len(swaps) < MIN_SAMPLE_SIZE:
+            return WashTradingResult(
+                unique_wallets=len(set(s.wallet for s in swaps)),
+                total_transactions_sampled=total_sampled,
+                manipulation_level="unknown",
+            )
+
         wallets: Dict[str, WalletActivity] = {}
 
         for swap in swaps:
@@ -452,6 +530,7 @@ class WashTradingDetector:
         )
 
         if not swaps or not wallets:
+            result.manipulation_score = 0.0
             result.manipulation_level = "clean"
             return result
 

@@ -689,7 +689,8 @@ class TokenAnalyzer:
         token_data.wash_trading_data = result
         self._log(
             "info",
-            f"Wash trading score: {result.manipulation_score}/10 ({result.manipulation_level})",
+            f"Wash trading: {result.manipulation_level}"
+            + (f" ({result.manipulation_score}/10)" if result.manipulation_score is not None else ""),
         )
 
     async def _generate_structured_ai_analysis(
@@ -823,7 +824,10 @@ class TokenAnalyzer:
             wt = token_data.wash_trading_data
             lines.append("")
             lines.append("=== Wash Trading Analysis ===")
-            lines.append(f"Manipulation Score: {wt.manipulation_score}/10 ({wt.manipulation_level})")
+            if wt.manipulation_score is not None:
+                lines.append(f"Manipulation Score: {wt.manipulation_score}/10 ({wt.manipulation_level})")
+            else:
+                lines.append(f"Manipulation Analysis: {wt.manipulation_level}")
             lines.append(f"Unique Wallets: {wt.unique_wallets} / Sampled Txs: {wt.total_transactions_sampled}")
             if wt.repeat_buyers:
                 buyers_str = ", ".join(
@@ -968,7 +972,10 @@ class TokenAnalyzer:
                 "clean": "✅", "moderate": "⚠️",
                 "suspicious": "🚨", "critical": "🔴",
             }.get(wt.manipulation_level, "❓")
-            lines.append(f"\n{wt_emoji} Wash Trading: {wt.manipulation_score}/10 ({wt.manipulation_level})")
+            lines.append(f"\n{wt_emoji} Wash Trading: "
+                         + (f"{wt.manipulation_score}/10 ({wt.manipulation_level})"
+                            if wt.manipulation_score is not None
+                            else wt.manipulation_level))
             if wt.unique_wallets:
                 lines.append(f"   Unique wallets: {wt.unique_wallets} across {wt.total_transactions_sampled} sampled txs")
             if wt.repeat_buyers:
