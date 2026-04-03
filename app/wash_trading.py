@@ -388,7 +388,12 @@ class WashTradingDetector:
         signature: str,
         block_time: Optional[int],
     ) -> Optional[ParsedSwap]:
-        """Fallback: detect buy/sell from pre/post token balance changes."""
+        """Fallback: detect buy/sell from pre/post token balance changes.
+
+        Only called when the fee payer has no token account for the target
+        mint (e.g. PDA-routed swaps on pumpswap).  Applies conservative
+        guards to avoid false positives from non-swap transactions.
+        """
         pre_balances = meta.get("preTokenBalances", [])
         post_balances = meta.get("postTokenBalances", [])
 
@@ -412,27 +417,56 @@ class WashTradingDetector:
             if owner and amount is not None:
                 post_map[owner] = post_map.get(owner, 0.0) + amount
 
-        # Check if the fee payer gained or lost tokens
+        # Check if the fee payer gained or lost tokens directly
         pre_amount = pre_map.get(fee_payer, 0.0)
         post_amount = post_map.get(fee_payer, 0.0)
         net = post_amount - pre_amount
 
-        if abs(net) < 1e-9:
-            # Fee payer has no direct token balance change — try to identify the
-            # actual trader from ALL balance changes.  Some DEX programs (e.g.
-            # pumpswap) route tokens through intermediary PDAs, so the fee payer
-            # signs the transaction but a different wallet receives the tokens.
-            all_owners = set(pre_map.keys()) | set(post_map.keys())
+        if abs(net) >= 1e-9:
+            direction = "buy" if net > 0 else "sell"
+            return ParsedSwap(
+                signature=signature,
+                wallet=fee_payer,
+                direction=direction,
+                token_amount=abs(net),
+                block_time=block_time,
+            )
 
-            # Check for newly appearing token accounts (buy signal): a wallet
-            # that has tokens in post but was absent in pre.
-            best_new_amount = 0.0
-            for owner in all_owners:
-                pre_amt = pre_map.get(owner, 0.0)
+        # --- Swap guard: require opposing balance changes ---
+        # If all deltas go the same direction this is a distribution or
+        # collection, not a swap.
+        all_owners = set(pre_map.keys()) | set(post_map.keys())
+        deltas: Dict[str, float] = {}
+        for owner in all_owners:
+            d = post_map.get(owner, 0.0) - pre_map.get(owner, 0.0)
+            if abs(d) > 1e-9:
+                deltas[owner] = d
+
+        has_positive = any(d > 0 for d in deltas.values())
+        has_negative = any(d < 0 for d in deltas.values())
+
+        if not (has_positive and has_negative):
+            return None
+
+        # --- Evaluate BOTH new-account and closed-account signals ---
+        # Collecting both before choosing avoids Case 1 (buy) preempting
+        # Case 2 (sell) when a small fee ATA is created in a sell tx.
+        best_new_amount = 0.0
+        for owner in all_owners:
+            if owner not in pre_map:
                 post_amt = post_map.get(owner, 0.0)
-                if pre_amt < 1e-9 and post_amt > best_new_amount and owner not in pre_map:
+                if post_amt > best_new_amount:
                     best_new_amount = post_amt
-            if best_new_amount > 1e-9:
+
+        best_closed_amount = 0.0
+        for owner in all_owners:
+            if owner not in post_map:
+                pre_amt = pre_map.get(owner, 0.0)
+                if pre_amt > best_closed_amount:
+                    best_closed_amount = pre_amt
+
+        if best_new_amount > 1e-9 or best_closed_amount > 1e-9:
+            if best_new_amount >= best_closed_amount:
                 return ParsedSwap(
                     signature=signature,
                     wallet=fee_payer,
@@ -440,53 +474,49 @@ class WashTradingDetector:
                     token_amount=best_new_amount,
                     block_time=block_time,
                 )
+            return ParsedSwap(
+                signature=signature,
+                wallet=fee_payer,
+                direction="sell",
+                token_amount=best_closed_amount,
+                block_time=block_time,
+            )
 
-            # Check for disappearing token accounts (sell signal): a wallet
-            # that had tokens in pre but is absent or empty in post.
-            best_closed_amount = 0.0
-            for owner in all_owners:
-                pre_amt = pre_map.get(owner, 0.0)
-                post_amt = post_map.get(owner, 0.0)
-                if pre_amt > best_closed_amount and post_amt < 1e-9 and owner not in post_map:
-                    best_closed_amount = pre_amt
-            if best_closed_amount > 1e-9:
-                return ParsedSwap(
-                    signature=signature,
-                    wallet=fee_payer,
-                    direction="sell",
-                    token_amount=best_closed_amount,
-                    block_time=block_time,
-                )
-
-            # Last resort: wallet with the largest absolute delta
-            best_owner: Optional[str] = None
-            best_abs_net = 0.0
-            best_net_val = 0.0
-            for owner in all_owners:
-                owner_net = post_map.get(owner, 0.0) - pre_map.get(owner, 0.0)
-                if abs(owner_net) > best_abs_net:
-                    best_abs_net = abs(owner_net)
-                    best_net_val = owner_net
-                    best_owner = owner
-            if best_owner and best_abs_net > 1e-9:
-                direction = "buy" if best_net_val > 0 else "sell"
-                return ParsedSwap(
-                    signature=signature,
-                    wallet=fee_payer,
-                    direction=direction,
-                    token_amount=best_abs_net,
-                    block_time=block_time,
-                )
-            return None
-
-        direction = "buy" if net > 0 else "sell"
-        return ParsedSwap(
-            signature=signature,
-            wallet=fee_payer,
-            direction=direction,
-            token_amount=abs(net),
-            block_time=block_time,
+        # --- Last resort: existing accounts with balance changes ---
+        # Sort deterministically by (abs_delta DESC, owner ASC).
+        # Prefer the owner with the smaller pre-balance — pool vaults
+        # hold far more tokens than individual users.
+        sorted_deltas = sorted(
+            deltas.items(),
+            key=lambda x: (-abs(x[1]), x[0]),
         )
+
+        if len(sorted_deltas) >= 2:
+            owner_a, delta_a = sorted_deltas[0]
+            owner_b, delta_b = sorted_deltas[1]
+            pre_a = pre_map.get(owner_a, 0.0)
+            pre_b = pre_map.get(owner_b, 0.0)
+            chosen_delta = delta_b if pre_b < pre_a else delta_a
+            direction = "buy" if chosen_delta > 0 else "sell"
+            return ParsedSwap(
+                signature=signature,
+                wallet=fee_payer,
+                direction=direction,
+                token_amount=abs(chosen_delta),
+                block_time=block_time,
+            )
+        elif len(sorted_deltas) == 1:
+            _, delta = sorted_deltas[0]
+            direction = "buy" if delta > 0 else "sell"
+            return ParsedSwap(
+                signature=signature,
+                wallet=fee_payer,
+                direction=direction,
+                token_amount=abs(delta),
+                block_time=block_time,
+            )
+
+        return None
 
     def _extract_fee_payer(self, message: Dict[str, Any]) -> Optional[str]:
         """Extract the fee payer (first signer) from a transaction message."""
@@ -560,6 +590,10 @@ class WashTradingDetector:
 
         all_mints = set(pre_by_mint.keys()) | set(post_by_mint.keys())
         if len(all_mints) < 2:
+            if len(all_mints) == 0:
+                # Fee payer has no token accounts — check all owners'
+                # multi-mint changes to detect LP adds/removes.
+                return not self._any_owner_lp_pattern(meta)
             # Single token mint — other side is likely SOL (native lamports)
             return True
 
@@ -579,6 +613,50 @@ class WashTradingDetector:
             return False
 
         return True
+
+    def _any_owner_lp_pattern(self, meta: Dict[str, Any]) -> bool:
+        """Check if any owner has 2+ mints all changing in the same direction.
+
+        Detects LP add/remove operations when the fee payer has no token
+        accounts (PDA-routed transactions).
+        """
+        pre_balances = meta.get("preTokenBalances", [])
+        post_balances = meta.get("postTokenBalances", [])
+
+        owner_pre: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        owner_post: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+        for bal in (pre_balances or []):
+            if not isinstance(bal, dict):
+                continue
+            owner = bal.get("owner", "")
+            mint = bal.get("mint", "")
+            amount = self._extract_ui_amount(bal)
+            if owner and mint and amount is not None:
+                owner_pre[owner][mint] += amount
+
+        for bal in (post_balances or []):
+            if not isinstance(bal, dict):
+                continue
+            owner = bal.get("owner", "")
+            mint = bal.get("mint", "")
+            amount = self._extract_ui_amount(bal)
+            if owner and mint and amount is not None:
+                owner_post[owner][mint] += amount
+
+        for owner in set(owner_pre.keys()) | set(owner_post.keys()):
+            pre_mints = owner_pre[owner]
+            post_mints = owner_post[owner]
+            mints = set(pre_mints.keys()) | set(post_mints.keys())
+            directions: List[bool] = []
+            for mint in mints:
+                delta = post_mints.get(mint, 0.0) - pre_mints.get(mint, 0.0)
+                if abs(delta) > 1e-9:
+                    directions.append(delta > 0)
+            if len(directions) >= 2 and all(d == directions[0] for d in directions):
+                return True
+
+        return False
 
     def _detect_patterns(
         self, swaps: List[ParsedSwap], total_sampled: int

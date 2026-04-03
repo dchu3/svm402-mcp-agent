@@ -799,3 +799,370 @@ class TestSignerBasedFallback:
         assert result.wallet == "FeePayer"
         assert result.direction == "buy"
         assert result.token_amount == pytest.approx(1000.0)
+
+
+class TestSwapGuard:
+    """Tests for the swap guard that rejects non-swap transactions."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_distribution_rejected(self):
+        """Same-direction changes (all gains) are rejected as non-swap."""
+        meta = {
+            "preTokenBalances": [],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "RecipientA",
+                    "uiTokenAmount": {"uiAmountString": "100.0", "uiAmount": 100.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "RecipientB",
+                    "uiTokenAmount": {"uiAmountString": "200.0", "uiAmount": 200.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_dist", 1700000000
+        )
+        assert result is None
+
+    def test_collection_rejected(self):
+        """Same-direction changes (all losses) are rejected as non-swap."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "SourceA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "SourceB",
+                    "uiTokenAmount": {"uiAmountString": "300.0", "uiAmount": 300.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_coll", 1700000000
+        )
+        assert result is None
+
+
+class TestCasePreemption:
+    """Tests for correct direction when both new and closed accounts exist."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_sell_with_new_fee_ata(self):
+        """Sell tx that creates a small fee ATA is correctly classified as sell."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "5000.0", "uiAmount": 5000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 3,
+                    "mint": TOKEN_MINT,
+                    "owner": "SellerATA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "6000.0", "uiAmount": 6000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 4,
+                    "mint": TOKEN_MINT,
+                    "owner": "FeeATA",
+                    "uiTokenAmount": {"uiAmountString": "10.0", "uiAmount": 10.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_sell_fee", 1700000000
+        )
+        assert result is not None
+        assert result.direction == "sell"
+        assert result.token_amount == pytest.approx(1000.0)
+
+    def test_buy_with_larger_new_account(self):
+        """Buy signal wins when new account amount exceeds closed account amount."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "50000.0", "uiAmount": 50000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "SmallClosing",
+                    "uiTokenAmount": {"uiAmountString": "5.0", "uiAmount": 5.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "49000.0", "uiAmount": 49000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 3,
+                    "mint": TOKEN_MINT,
+                    "owner": "BuyerATA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_buy_close", 1700000000
+        )
+        assert result is not None
+        assert result.direction == "buy"
+        assert result.token_amount == pytest.approx(1000.0)
+
+
+class TestDirectionInversion:
+    """Tests for correct direction in the last-resort (existing accounts) path."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_repeat_buy_correct_direction(self):
+        """Repeat buy: pool vault has large pre-balance, user has small."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "50000.0", "uiAmount": 50000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "BuyerATA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "49000.0", "uiAmount": 49000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "BuyerATA",
+                    "uiTokenAmount": {"uiAmountString": "1500.0", "uiAmount": 1500.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_rbuy", 1700000000
+        )
+        assert result is not None
+        assert result.direction == "buy"
+        assert result.token_amount == pytest.approx(1000.0)
+
+    def test_repeat_sell_correct_direction(self):
+        """Repeat sell: pool vault has large pre-balance, user has small."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "50000.0", "uiAmount": 50000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "SellerATA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "50500.0", "uiAmount": 50500.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "SellerATA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_rsell", 1700000000
+        )
+        assert result is not None
+        assert result.direction == "sell"
+        assert result.token_amount == pytest.approx(500.0)
+
+    def test_deterministic_with_equal_pre_balances(self):
+        """Equal pre-balances still produce deterministic direction."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "WalletA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "WalletZ",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "WalletA",
+                    "uiTokenAmount": {"uiAmountString": "1500.0", "uiAmount": 1500.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "WalletZ",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+            ],
+        }
+        # Run multiple times to verify determinism
+        results = [
+            self.detector._parse_from_balance_changes(
+                meta, TOKEN_MINT, "FeePayer", f"sig_det_{i}", 1700000000
+            )
+            for i in range(10)
+        ]
+        directions = [r.direction for r in results if r is not None]
+        assert len(set(directions)) == 1, "Direction should be deterministic"
+
+
+class TestLpFilterBypass:
+    """Tests for LP filter when fee payer has no token accounts."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_lp_add_via_pda_filtered(self):
+        """LP add with PDA routing (fee payer has no token accounts) is filtered."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": "TokenA",
+                    "owner": "UserPDA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": "TokenB",
+                    "owner": "UserPDA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": "TokenA",
+                    "owner": "UserPDA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": "TokenB",
+                    "owner": "UserPDA",
+                    "uiTokenAmount": {"uiAmountString": "250.0", "uiAmount": 250.0, "decimals": 6},
+                },
+            ],
+        }
+        assert self.detector._is_likely_swap(meta, "FeePayer") is False
+
+    def test_swap_via_pda_allowed(self):
+        """Swap with PDA routing (single mint change) still allowed."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "10000.0", "uiAmount": 10000.0, "decimals": 6},
+                },
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "PoolVault",
+                    "uiTokenAmount": {"uiAmountString": "9000.0", "uiAmount": 9000.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "BuyerATA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                },
+            ],
+        }
+        assert self.detector._is_likely_swap(meta, "FeePayer") is True
+
+    def test_any_owner_lp_pattern_helper(self):
+        """_any_owner_lp_pattern detects LP pattern across owners."""
+        meta = {
+            "preTokenBalances": [
+                {"mint": "MintA", "owner": "LPProvider", "uiTokenAmount": {"uiAmountString": "100.0", "uiAmount": 100.0}},
+                {"mint": "MintB", "owner": "LPProvider", "uiTokenAmount": {"uiAmountString": "200.0", "uiAmount": 200.0}},
+            ],
+            "postTokenBalances": [
+                {"mint": "MintA", "owner": "LPProvider", "uiTokenAmount": {"uiAmountString": "50.0", "uiAmount": 50.0}},
+                {"mint": "MintB", "owner": "LPProvider", "uiTokenAmount": {"uiAmountString": "100.0", "uiAmount": 100.0}},
+            ],
+        }
+        assert self.detector._any_owner_lp_pattern(meta) is True
+
+    def test_no_lp_pattern_for_single_mint(self):
+        """Single-mint changes are not LP patterns."""
+        meta = {
+            "preTokenBalances": [
+                {"mint": TOKEN_MINT, "owner": "PoolVault", "uiTokenAmount": {"uiAmountString": "5000.0", "uiAmount": 5000.0}},
+            ],
+            "postTokenBalances": [
+                {"mint": TOKEN_MINT, "owner": "PoolVault", "uiTokenAmount": {"uiAmountString": "4000.0", "uiAmount": 4000.0}},
+                {"mint": TOKEN_MINT, "owner": "Buyer", "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0}},
+            ],
+        }
+        assert self.detector._any_owner_lp_pattern(meta) is False
