@@ -220,6 +220,22 @@ export function makeMcpServer(
             concentration_risk: z.string(),
           })
           .nullable(),
+        wash_trading: z
+          .object({
+            manipulation_score: z.number().nullable(),
+            manipulation_level: z.string(),
+            unique_wallets: z.number().nullable(),
+            total_transactions_sampled: z.number().nullable(),
+            repeat_buyers: z.array(
+              z.object({
+                wallet: z.string(),
+                buy_count: z.number(),
+                sell_count: z.number(),
+              })
+            ),
+            flags: z.array(z.string()),
+          })
+          .nullable(),
         ai_analysis: z.object({
           key_strengths: z.array(z.string()),
           key_risks: z.array(z.string()),

@@ -163,6 +163,15 @@ class HolderSnapshotResponse(BaseModel):
     concentration_risk: str = "unknown"
 
 
+class WashTradingResponse(BaseModel):
+    manipulation_score: Optional[float] = None
+    manipulation_level: str = "unknown"
+    unique_wallets: Optional[int] = None
+    total_transactions_sampled: Optional[int] = None
+    repeat_buyers: List[Dict[str, Any]] = Field(default_factory=list)
+    flags: List[str] = Field(default_factory=list)
+
+
 class AIAnalysisResponse(BaseModel):
     key_strengths: List[str] = Field(default_factory=list)
     key_risks: List[str] = Field(default_factory=list)
@@ -185,6 +194,7 @@ class AnalyzeResponse(BaseModel):
     liquidity: LiquidityResponse
     safety: SafetyResponse
     holder_snapshot: Optional[HolderSnapshotResponse] = None
+    wash_trading: Optional[WashTradingResponse] = None
     ai_analysis: AIAnalysisResponse
     verdict: VerdictResponse
     human_readable: str
@@ -234,6 +244,10 @@ async def analyze_token(request: AnalyzeRequest, http_request: Request) -> Analy
     if structured.holder_snapshot:
         holder_snapshot = HolderSnapshotResponse(**structured.holder_snapshot)
 
+    wash_trading = None
+    if structured.wash_trading:
+        wash_trading = WashTradingResponse(**structured.wash_trading)
+
     return AnalyzeResponse(
         token=structured.token,
         chain=structured.chain,
@@ -243,6 +257,7 @@ async def analyze_token(request: AnalyzeRequest, http_request: Request) -> Analy
         liquidity=LiquidityResponse(**structured.liquidity),
         safety=SafetyResponse(**structured.safety),
         holder_snapshot=holder_snapshot,
+        wash_trading=wash_trading,
         ai_analysis=AIAnalysisResponse(**structured.ai_analysis),
         verdict=VerdictResponse(**structured.verdict),
         human_readable=structured.human_readable,

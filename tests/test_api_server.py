@@ -43,6 +43,7 @@ def _make_structured_report(**overrides):
             "flags": [],
         },
         holder_snapshot=None,
+        wash_trading=None,
         ai_analysis={
             "key_strengths": ["good liquidity"],
             "key_risks": ["meme volatility"],
@@ -195,6 +196,66 @@ async def test_analyze_with_holder_snapshot(monkeypatch):
     data = response.json()
     assert data["holder_snapshot"]["top_10_holders_percent"] == 38.4
     assert data["holder_snapshot"]["concentration_risk"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_analyze_with_wash_trading(monkeypatch):
+    structured = _make_structured_report(
+        wash_trading={
+            "manipulation_score": 6.5,
+            "manipulation_level": "suspicious",
+            "unique_wallets": 5,
+            "total_transactions_sampled": 30,
+            "repeat_buyers": [
+                {"wallet": "Abc123", "buy_count": 8, "sell_count": 1},
+            ],
+            "flags": ["Single wallet made 8 purchases"],
+        }
+    )
+    mock_analyzer = MagicMock()
+    mock_analyzer.analyze = AsyncMock(
+        return_value=AnalysisReport(
+            token_data=TokenData(address=_VALID_SOLANA_ADDR, chain="solana", safety_status="Safe"),
+            generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            structured=structured,
+        )
+    )
+    monkeypatch.setattr(api_server, "_token_analyzer", mock_analyzer)
+
+    transport = ASGITransport(app=api_server.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/analyze", json={"address": _VALID_SOLANA_ADDR})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["wash_trading"]["manipulation_score"] == 6.5
+    assert data["wash_trading"]["manipulation_level"] == "suspicious"
+    assert data["wash_trading"]["unique_wallets"] == 5
+    assert len(data["wash_trading"]["repeat_buyers"]) == 1
+    assert data["wash_trading"]["flags"] == ["Single wallet made 8 purchases"]
+
+
+@pytest.mark.asyncio
+async def test_analyze_wash_trading_null_when_absent(monkeypatch):
+    """wash_trading is null when not present in report."""
+    structured = _make_structured_report()
+    mock_analyzer = MagicMock()
+    mock_analyzer.analyze = AsyncMock(
+        return_value=AnalysisReport(
+            token_data=TokenData(address=_VALID_SOLANA_ADDR, chain="solana", safety_status="Safe"),
+            generated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            structured=structured,
+        )
+    )
+    monkeypatch.setattr(api_server, "_token_analyzer", mock_analyzer)
+
+    transport = ASGITransport(app=api_server.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/analyze", json={"address": _VALID_SOLANA_ADDR})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["wash_trading"] is None
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from google import genai
 from google.genai import types
 
 from app.formatting import format_price, format_large_number
+from app.wash_trading import WashTradingDetector, WashTradingResult
 
 if TYPE_CHECKING:
     from app.mcp_client import MCPManager
@@ -61,6 +62,9 @@ class TokenData:
     risk_level: Optional[str] = None  # low, medium, high
     safety_flags: List[str] = field(default_factory=list)
 
+    # Wash trading / manipulation analysis
+    wash_trading_data: Optional[WashTradingResult] = None
+
 
 @dataclass
 class StructuredAIAnalysis:
@@ -93,6 +97,7 @@ class StructuredAnalysisReport:
     liquidity: Dict[str, Any]
     safety: Dict[str, Any]
     holder_snapshot: Optional[Dict[str, Any]]
+    wash_trading: Optional[Dict[str, Any]]
     ai_analysis: Dict[str, Any]
     verdict: Dict[str, Any]
     human_readable: str
@@ -171,12 +176,12 @@ You MUST return valid JSON matching this exact schema:
 
 Guidelines:
 - key_strengths: 1-4 short phrases about what's good (safety, liquidity, momentum, etc.)
-- key_risks: 1-4 short phrases about concerns (volatility, concentration, low liquidity, etc.)
-- whale_signal: Based on holder concentration and trading patterns in the data
+- key_risks: 1-4 short phrases about concerns (volatility, concentration, low liquidity, wash trading, etc.)
+- whale_signal: Based on holder concentration, trading patterns, and wash trading analysis in the data
 - narrative_momentum: Based on price action, volume trends, and market sentiment
-- action: Your recommended action for a trader
+- action: Your recommended action for a trader. Heavily penalize tokens showing wash trading or manipulation signals.
 - confidence: How confident you are in this recommendation
-- one_sentence: A punchy, opinionated summary — be direct
+- one_sentence: A punchy, opinionated summary — be direct. Mention manipulation concerns if wash trading score is high.
 
 Return ONLY the JSON object, no markdown, no explanation.
 """
@@ -291,6 +296,11 @@ class TokenAnalyzer:
             except Exception as e:
                 self._log("error", f"Data collection task 'holder' failed: {e}")
                 token_data.errors.append(f"holder error: {e}")
+            try:
+                await self._fetch_wash_trading_data(address, token_data)
+            except Exception as e:
+                self._log("error", f"Data collection task 'wash_trading' failed: {e}")
+                token_data.errors.append(f"wash_trading error: {e}")
         else:
             token_data.safety_status = "Unverified"
             token_data.safety_data = {"note": f"Safety checks not available for {resolved_chain}"}
@@ -651,6 +661,38 @@ class TokenAnalyzer:
         else:
             token_data.holder_concentration_risk = "low"
 
+    async def _fetch_wash_trading_data(
+        self, address: str, token_data: TokenData
+    ) -> None:
+        """Fetch wash trading / manipulation analysis for the token.
+
+        Uses the first pool address from DexScreener data to scan recent
+        transactions and detect repeat-buyer patterns.
+        """
+        if not token_data.pools:
+            self._log("info", "No pool data available for wash trading analysis")
+            return
+
+        pool_address = token_data.pools[0].get("pair")
+        if not pool_address:
+            self._log("info", "No pool pair address for wash trading analysis")
+            return
+
+        detector = WashTradingDetector(
+            mcp_manager=self.mcp_manager,
+            verbose=self.verbose,
+            log_callback=self.log_callback,
+        )
+
+        self._log("info", f"Running wash trading analysis on pool {pool_address}")
+        result = await detector.analyze(address, pool_address)
+        token_data.wash_trading_data = result
+        self._log(
+            "info",
+            f"Wash trading: {result.manipulation_level}"
+            + (f" ({result.manipulation_score}/10)" if result.manipulation_score is not None else ""),
+        )
+
     async def _generate_structured_ai_analysis(
         self, token_data: TokenData
     ) -> tuple[StructuredAIAnalysis, Verdict]:
@@ -777,6 +819,25 @@ class TokenAnalyzer:
                     f"- {pool['dex']}: ${(pool.get('liquidity') or 0):,.0f} liquidity"
                 )
         
+        # Wash trading / manipulation analysis
+        if token_data.wash_trading_data:
+            wt = token_data.wash_trading_data
+            lines.append("")
+            lines.append("=== Wash Trading Analysis ===")
+            if wt.manipulation_score is not None:
+                lines.append(f"Manipulation Score: {wt.manipulation_score}/10 ({wt.manipulation_level})")
+            else:
+                lines.append(f"Manipulation Analysis: {wt.manipulation_level}")
+            lines.append(f"Unique Wallets: {wt.unique_wallets} / Sampled Txs: {wt.total_transactions_sampled}")
+            if wt.repeat_buyers:
+                buyers_str = ", ".join(
+                    f"{rb['wallet'][:8]}...({rb['buy_count']} buys)"
+                    for rb in wt.repeat_buyers[:5]
+                )
+                lines.append(f"Repeat Buyers: {buyers_str}")
+            if wt.flags:
+                lines.append(f"Flags: {'; '.join(wt.flags[:5])}")
+
         # Add errors if any
         if token_data.errors:
             lines.append("")
@@ -812,6 +873,10 @@ class TokenAnalyzer:
                 "concentration_risk": token_data.holder_concentration_risk or "unknown",
             }
 
+        wash_trading = None
+        if token_data.wash_trading_data:
+            wash_trading = token_data.wash_trading_data.to_dict()
+
         human_readable = self._build_human_readable(
             token_data, ai_analysis, verdict, generated_at
         )
@@ -841,6 +906,7 @@ class TokenAnalyzer:
                 "flags": token_data.safety_flags[:10],
             },
             holder_snapshot=holder_snapshot,
+            wash_trading=wash_trading,
             ai_analysis={
                 "key_strengths": ai_analysis.key_strengths,
                 "key_risks": ai_analysis.key_risks,
@@ -899,6 +965,25 @@ class TokenAnalyzer:
 
         if token_data.top_10_holders_pct is not None:
             lines.append(f"👥 Top 10 Holders: {token_data.top_10_holders_pct:.1f}% ({token_data.holder_concentration_risk or 'unknown'})")
+
+        if token_data.wash_trading_data:
+            wt = token_data.wash_trading_data
+            wt_emoji = {
+                "clean": "✅", "moderate": "⚠️",
+                "suspicious": "🚨", "critical": "🔴",
+            }.get(wt.manipulation_level, "❓")
+            lines.append(f"\n{wt_emoji} Wash Trading: "
+                         + (f"{wt.manipulation_score}/10 ({wt.manipulation_level})"
+                            if wt.manipulation_score is not None
+                            else wt.manipulation_level))
+            if wt.unique_wallets:
+                lines.append(f"   Unique wallets: {wt.unique_wallets} across {wt.total_transactions_sampled} sampled txs")
+            if wt.repeat_buyers:
+                top_buyer = wt.repeat_buyers[0]
+                lines.append(f"   Top repeat buyer: {top_buyer['wallet'][:8]}... ({top_buyer['buy_count']} buys)")
+            if wt.flags:
+                for flag_text in wt.flags[:3]:
+                    lines.append(f"   ⚠️ {flag_text}")
 
         if ai_analysis.key_strengths:
             lines.append(f"\n✅ Strengths: {', '.join(ai_analysis.key_strengths)}")
