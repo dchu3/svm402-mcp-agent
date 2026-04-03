@@ -583,3 +583,219 @@ class TestIsLikelySwap:
         """No token balances at all defaults to swap (permissive)."""
         meta = {"preTokenBalances": [], "postTokenBalances": []}
         assert self.detector._is_likely_swap(meta, "Payer") is True
+
+
+class TestRpcEnvelopeUnwrapping:
+    """Tests for JSON-RPC envelope unwrapping in _parse_transaction."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_unwraps_jsonrpc_envelope(self):
+        """Transaction wrapped in JSON-RPC envelope is parsed correctly."""
+        inner_tx = _make_transaction("WalletA", TOKEN_MINT, 0.0, 500.0)
+        wrapped = {"jsonrpc": "2.0", "result": inner_tx}
+        result = self.detector._parse_transaction(wrapped, TOKEN_MINT, "sig_wrap")
+        assert result is not None
+        assert result.wallet == "WalletA"
+        assert result.direction == "buy"
+        assert result.token_amount == pytest.approx(500.0)
+
+    def test_unwraps_result_only_envelope(self):
+        """Transaction wrapped with only a 'result' key is parsed correctly."""
+        inner_tx = _make_transaction("WalletB", TOKEN_MINT, 1000.0, 0.0)
+        wrapped = {"result": inner_tx}
+        result = self.detector._parse_transaction(wrapped, TOKEN_MINT, "sig_wrap2")
+        assert result is not None
+        assert result.wallet == "WalletB"
+        assert result.direction == "sell"
+
+    def test_no_unwrap_when_meta_present(self):
+        """Direct transaction data (with meta at top level) is not unwrapped."""
+        tx = _make_transaction("WalletA", TOKEN_MINT, 0.0, 200.0)
+        result = self.detector._parse_transaction(tx, TOKEN_MINT, "sig_direct")
+        assert result is not None
+        assert result.direction == "buy"
+
+
+class TestExplanatoryFlags:
+    """Tests for descriptive flags in analyze() early returns."""
+
+    @pytest.mark.asyncio
+    async def test_no_client_flag(self):
+        """Flag explains that Solana RPC client is unavailable."""
+        manager = _make_mcp_manager(solana_client=None)
+        detector = WashTradingDetector(manager)
+        result = await detector.analyze(TOKEN_MINT, POOL_ADDRESS)
+        assert result.manipulation_level == "unknown"
+        assert any("client" in f.lower() for f in result.flags)
+
+    @pytest.mark.asyncio
+    async def test_no_signatures_flag(self):
+        """Flag explains that no signatures were found."""
+        client = AsyncMock()
+        client.call_tool = AsyncMock(return_value=json.dumps([]))
+        manager = _make_mcp_manager(solana_client=client)
+        detector = WashTradingDetector(manager)
+        result = await detector.analyze(TOKEN_MINT, POOL_ADDRESS)
+        assert result.manipulation_level == "unknown"
+        assert any("signature" in f.lower() for f in result.flags)
+
+    @pytest.mark.asyncio
+    async def test_zero_swaps_parsed_flag(self):
+        """Flag explains 0/N swaps parsed when transactions exist but fail to parse."""
+        sigs = _make_signatures(5)
+
+        async def mock_call_tool(method, args):
+            if method == "getSignaturesForAddress":
+                return json.dumps(sigs)
+            elif method == "getTransaction":
+                # Return a transaction for a different token mint
+                return json.dumps(
+                    _make_transaction("WalletA", "DifferentMint", 0.0, 100.0)
+                )
+            return "{}"
+
+        client = AsyncMock()
+        client.call_tool = mock_call_tool
+        manager = _make_mcp_manager(solana_client=client)
+        detector = WashTradingDetector(manager)
+        result = await detector.analyze(TOKEN_MINT, POOL_ADDRESS)
+        assert result.manipulation_level == "unknown"
+        assert result.total_transactions_sampled == 5
+        assert any("0/" in f for f in result.flags)
+
+    @pytest.mark.asyncio
+    async def test_fetch_errors_flag(self):
+        """Flag reports fetch error count when RPC calls fail."""
+        sigs = _make_signatures(3)
+        call_count = 0
+
+        async def mock_call_tool(method, args):
+            nonlocal call_count
+            if method == "getSignaturesForAddress":
+                return json.dumps(sigs)
+            elif method == "getTransaction":
+                call_count += 1
+                raise Exception("RPC timeout")
+            return "{}"
+
+        client = AsyncMock()
+        client.call_tool = mock_call_tool
+        manager = _make_mcp_manager(solana_client=client)
+        detector = WashTradingDetector(manager)
+        result = await detector.analyze(TOKEN_MINT, POOL_ADDRESS)
+        assert result.manipulation_level == "unknown"
+        assert any("error" in f.lower() for f in result.flags)
+
+
+class TestSignerBasedFallback:
+    """Tests for signer-based fallback in _parse_from_balance_changes."""
+
+    def setup_method(self):
+        manager = _make_mcp_manager()
+        self.detector = WashTradingDetector(manager)
+
+    def test_fallback_detects_buy_via_other_wallet(self):
+        """Detect a buy when fee payer has no direct token balance but another wallet does."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "IntermediaryPDA",
+                    "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                }
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 2,
+                    "mint": TOKEN_MINT,
+                    "owner": "IntermediaryPDA",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+                {
+                    "accountIndex": 3,
+                    "mint": TOKEN_MINT,
+                    "owner": "ReceiverWallet",
+                    "uiTokenAmount": {"uiAmountString": "500.0", "uiAmount": 500.0, "decimals": 6},
+                },
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_fb", 1700000000
+        )
+        assert result is not None
+        assert result.wallet == "FeePayer"
+        # The intermediary lost 500, receiver gained 500 — largest abs delta is 500
+        assert result.token_amount == pytest.approx(500.0)
+
+    def test_fallback_returns_none_when_no_changes(self):
+        """Return None when no wallet has any token balance change."""
+        meta = {
+            "preTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "SomeWallet",
+                    "uiTokenAmount": {"uiAmountString": "100.0", "uiAmount": 100.0, "decimals": 6},
+                }
+            ],
+            "postTokenBalances": [
+                {
+                    "accountIndex": 1,
+                    "mint": TOKEN_MINT,
+                    "owner": "SomeWallet",
+                    "uiTokenAmount": {"uiAmountString": "100.0", "uiAmount": 100.0, "decimals": 6},
+                }
+            ],
+        }
+        result = self.detector._parse_from_balance_changes(
+            meta, TOKEN_MINT, "FeePayer", "sig_fb2", 1700000000
+        )
+        assert result is None
+
+    def test_pumpswap_style_transaction(self):
+        """Full _parse_transaction test for pumpswap-style tx where fee payer has no token accounts."""
+        tx = {
+            "blockTime": 1700000000,
+            "meta": {
+                "err": None,
+                "preTokenBalances": [
+                    {
+                        "accountIndex": 5,
+                        "mint": TOKEN_MINT,
+                        "owner": "PoolVault",
+                        "uiTokenAmount": {"uiAmountString": "10000.0", "uiAmount": 10000.0, "decimals": 6},
+                    },
+                ],
+                "postTokenBalances": [
+                    {
+                        "accountIndex": 5,
+                        "mint": TOKEN_MINT,
+                        "owner": "PoolVault",
+                        "uiTokenAmount": {"uiAmountString": "9000.0", "uiAmount": 9000.0, "decimals": 6},
+                    },
+                    {
+                        "accountIndex": 6,
+                        "mint": TOKEN_MINT,
+                        "owner": "BuyerATA",
+                        "uiTokenAmount": {"uiAmountString": "1000.0", "uiAmount": 1000.0, "decimals": 6},
+                    },
+                ],
+            },
+            "transaction": {
+                "message": {
+                    "accountKeys": [
+                        {"pubkey": "FeePayer", "signer": True, "writable": True},
+                        {"pubkey": "PumpProgram", "signer": False, "writable": False},
+                    ],
+                }
+            },
+        }
+        result = self.detector._parse_transaction(tx, TOKEN_MINT, "sig_pump")
+        assert result is not None
+        assert result.wallet == "FeePayer"
+        assert result.direction == "buy"
+        assert result.token_amount == pytest.approx(1000.0)

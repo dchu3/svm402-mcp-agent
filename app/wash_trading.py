@@ -114,27 +114,42 @@ class WashTradingDetector:
         client = self.mcp_manager.get_client("solana")
         if not client:
             self._log("info", "Solana RPC client not available for wash trading analysis")
-            return WashTradingResult(manipulation_level="unknown")
+            return WashTradingResult(
+                manipulation_level="unknown",
+                flags=["Solana RPC client not available"],
+            )
 
         # Fetch recent transaction signatures for the pool
         signatures = await self._fetch_pool_signatures(pool_address)
         if not signatures:
             self._log("info", f"No signatures found for pool {pool_address}")
-            return WashTradingResult(manipulation_level="unknown")
+            return WashTradingResult(
+                manipulation_level="unknown",
+                flags=[f"No transaction signatures found for pool {pool_address[:16]}..."],
+            )
 
         # Parse a sample of transactions
-        swaps = await self._fetch_and_parse_transactions(
-            signatures[:MAX_TX_SAMPLE], token_address
+        sampled = signatures[:MAX_TX_SAMPLE]
+        swaps, fetch_errors = await self._fetch_and_parse_transactions(
+            sampled, token_address
         )
 
         if not swaps:
             self._log("info", "No swaps parsed from pool transactions")
+            flags = [
+                f"0/{len(sampled)} sampled transactions contained parseable swaps for this token"
+            ]
+            if fetch_errors > 0:
+                flags.append(
+                    f"{fetch_errors}/{len(sampled)} transaction fetches failed with errors"
+                )
             return WashTradingResult(
-                total_transactions_sampled=len(signatures[:MAX_TX_SAMPLE]),
+                total_transactions_sampled=len(sampled),
                 manipulation_level="unknown",
+                flags=flags,
             )
 
-        return self._detect_patterns(swaps, len(signatures[:MAX_TX_SAMPLE]))
+        return self._detect_patterns(swaps, len(sampled))
 
     async def _fetch_pool_signatures(
         self, pool_address: str
@@ -174,11 +189,15 @@ class WashTradingDetector:
         self,
         signatures: List[Dict[str, Any]],
         token_address: str,
-    ) -> List[ParsedSwap]:
-        """Fetch and parse a batch of transactions in parallel."""
+    ) -> tuple[List[ParsedSwap], int]:
+        """Fetch and parse a batch of transactions in parallel.
+
+        Returns:
+            A tuple of (parsed_swaps, fetch_error_count).
+        """
         client = self.mcp_manager.get_client("solana")
         if not client:
-            return []
+            return [], 0
 
         sig_strings = []
         for sig_entry in signatures:
@@ -190,9 +209,12 @@ class WashTradingDetector:
                 sig_strings.append(sig_entry)
 
         if not sig_strings:
-            return []
+            return [], 0
+
+        fetch_errors = 0
 
         async def fetch_one(sig: str) -> Optional[ParsedSwap]:
+            nonlocal fetch_errors
             async with semaphore:
                 try:
                     result = await client.call_tool(
@@ -207,6 +229,7 @@ class WashTradingDetector:
                     if isinstance(result, dict):
                         return self._parse_transaction(result, token_address, sig)
                 except Exception as e:
+                    fetch_errors += 1
                     self._log("error", f"Failed to fetch tx {sig[:16]}...: {e}")
                 return None
 
@@ -226,7 +249,16 @@ class WashTradingDetector:
         for r in results:
             if isinstance(r, ParsedSwap):
                 swaps.append(r)
-        return swaps
+            elif isinstance(r, BaseException):
+                fetch_errors += 1
+
+        self._log(
+            "info",
+            f"Wash trading parse result: {len(swaps)}/{len(sig_strings)} swaps parsed"
+            + (f" ({fetch_errors} fetch errors)" if fetch_errors else ""),
+        )
+
+        return swaps, fetch_errors
 
     def _parse_transaction(
         self,
@@ -242,6 +274,11 @@ class WashTradingDetector:
         """
         if not isinstance(tx_data, dict):
             return None
+
+        # Unwrap JSON-RPC envelope if the MCP server returned the raw RPC
+        # response (e.g. {"jsonrpc": "2.0", "result": {…tx…}}).
+        if "result" in tx_data and isinstance(tx_data.get("result"), dict) and "meta" not in tx_data:
+            tx_data = tx_data["result"]
 
         # Skip failed transactions
         meta = tx_data.get("meta")
@@ -381,6 +418,65 @@ class WashTradingDetector:
         net = post_amount - pre_amount
 
         if abs(net) < 1e-9:
+            # Fee payer has no direct token balance change — try to identify the
+            # actual trader from ALL balance changes.  Some DEX programs (e.g.
+            # pumpswap) route tokens through intermediary PDAs, so the fee payer
+            # signs the transaction but a different wallet receives the tokens.
+            all_owners = set(pre_map.keys()) | set(post_map.keys())
+
+            # Check for newly appearing token accounts (buy signal): a wallet
+            # that has tokens in post but was absent in pre.
+            best_new_amount = 0.0
+            for owner in all_owners:
+                pre_amt = pre_map.get(owner, 0.0)
+                post_amt = post_map.get(owner, 0.0)
+                if pre_amt < 1e-9 and post_amt > best_new_amount and owner not in pre_map:
+                    best_new_amount = post_amt
+            if best_new_amount > 1e-9:
+                return ParsedSwap(
+                    signature=signature,
+                    wallet=fee_payer,
+                    direction="buy",
+                    token_amount=best_new_amount,
+                    block_time=block_time,
+                )
+
+            # Check for disappearing token accounts (sell signal): a wallet
+            # that had tokens in pre but is absent or empty in post.
+            best_closed_amount = 0.0
+            for owner in all_owners:
+                pre_amt = pre_map.get(owner, 0.0)
+                post_amt = post_map.get(owner, 0.0)
+                if pre_amt > best_closed_amount and post_amt < 1e-9 and owner not in post_map:
+                    best_closed_amount = pre_amt
+            if best_closed_amount > 1e-9:
+                return ParsedSwap(
+                    signature=signature,
+                    wallet=fee_payer,
+                    direction="sell",
+                    token_amount=best_closed_amount,
+                    block_time=block_time,
+                )
+
+            # Last resort: wallet with the largest absolute delta
+            best_owner: Optional[str] = None
+            best_abs_net = 0.0
+            best_net_val = 0.0
+            for owner in all_owners:
+                owner_net = post_map.get(owner, 0.0) - pre_map.get(owner, 0.0)
+                if abs(owner_net) > best_abs_net:
+                    best_abs_net = abs(owner_net)
+                    best_net_val = owner_net
+                    best_owner = owner
+            if best_owner and best_abs_net > 1e-9:
+                direction = "buy" if best_net_val > 0 else "sell"
+                return ParsedSwap(
+                    signature=signature,
+                    wallet=fee_payer,
+                    direction=direction,
+                    token_amount=best_abs_net,
+                    block_time=block_time,
+                )
             return None
 
         direction = "buy" if net > 0 else "sell"
