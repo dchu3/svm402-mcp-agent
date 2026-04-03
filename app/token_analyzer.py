@@ -539,14 +539,21 @@ class TokenAnalyzer:
             holders = token_data.safety_data.get("topHolders", [])
             if not holders:
                 holders = token_data.safety_data.get("holders", [])
+            if not holders:
+                holders = token_data.safety_data.get("tokenHolders", [])
             if holders and isinstance(holders, list):
                 self._compute_holder_concentration(holders, token_data)
                 return
+            self._log(
+                "info",
+                "Rugcheck response has no holder keys (tried topHolders, holders, tokenHolders)",
+            )
 
         # Fallback: call Solana RPC getTokenLargestAccounts
         client = self.mcp_manager.get_client("solana")
         if not client:
             self._log("info", "Solana RPC client not available for holder data")
+            token_data.errors.append("Holder data unavailable: no Solana RPC client")
             return
 
         try:
@@ -560,7 +567,12 @@ class TokenAnalyzer:
                 try:
                     result = json.loads(result)
                 except (json.JSONDecodeError, ValueError):
+                    token_data.errors.append("Holder data: failed to parse getTokenLargestAccounts response")
                     return
+
+            # Unwrap JSON-RPC envelope if present
+            if isinstance(result, dict) and "result" in result and isinstance(result.get("result"), dict):
+                result = result["result"]
 
             if isinstance(result, dict):
                 accounts = result.get("value", [])
@@ -580,8 +592,17 @@ class TokenAnalyzer:
                                     holder_list.append({"pct": pct})
                         if holder_list:
                             self._compute_holder_concentration(holder_list, token_data)
+                            return
+                        self._log("info", "Holder data: no extractable amounts from largest accounts")
+                    else:
+                        self._log("info", "Holder data: could not extract total supply")
+                else:
+                    self._log("info", "Holder data: getTokenLargestAccounts returned no accounts")
+
+            token_data.errors.append("Holder data unavailable from both rugcheck and Solana RPC")
         except Exception as e:
             self._log("error", f"Solana holder data fetch failed: {e}")
+            token_data.errors.append(f"Holder data error: {e}")
 
     def _extract_solana_ui_amount(self, value: Dict[str, Any]) -> Optional[float]:
         """Extract a Solana token amount in UI units from RPC response fields."""
@@ -636,6 +657,9 @@ class TokenAnalyzer:
             except (json.JSONDecodeError, ValueError):
                 return None
         if isinstance(supply_result, dict):
+            # Unwrap JSON-RPC envelope if present
+            if "result" in supply_result and isinstance(supply_result.get("result"), dict):
+                supply_result = supply_result["result"]
             value = supply_result.get("value", {})
             if isinstance(value, dict):
                 return self._extract_solana_ui_amount(value)
