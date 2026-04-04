@@ -59,10 +59,18 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
 
     await _mcp_manager.start()
 
+    # Create optional Helius client for DAS/Enhanced API features
+    helius_client = None
+    if settings.helius_api_key:
+        from app.helius_client import HeliusClient
+        helius_client = HeliusClient(api_key=settings.helius_api_key)
+        logger.info("Helius client initialized (DAS + Enhanced Transactions enabled)")
+
     _token_analyzer = TokenAnalyzer(
         api_key=settings.gemini_api_key,
         mcp_manager=_mcp_manager,
         model_name=settings.gemini_model,
+        helius_client=helius_client,
     )
 
     logger.info("Analysis server ready")
@@ -72,6 +80,8 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
         mcp_manager = _mcp_manager
         _token_analyzer = None
         _mcp_manager = None
+        if helius_client:
+            await helius_client.close()
         if mcp_manager:
             await mcp_manager.shutdown()
 

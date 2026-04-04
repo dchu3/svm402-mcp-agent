@@ -18,6 +18,7 @@ from app.wash_trading import WashTradingDetector, WashTradingResult
 
 if TYPE_CHECKING:
     from app.mcp_client import MCPManager
+    from app.helius_client import HeliusClient
 
 # Type alias for log callback
 LogCallback = Callable[[str, str, Optional[Dict[str, Any]]], None]
@@ -64,6 +65,16 @@ class TokenData:
 
     # Wash trading / manipulation analysis
     wash_trading_data: Optional[WashTradingResult] = None
+
+    # Helius DAS enrichment
+    token_standard: Optional[str] = None  # "Fungible", "NonFungible", etc.
+    metadata_uri: Optional[str] = None
+    token_description: Optional[str] = None
+    is_mutable: Optional[bool] = None
+    is_frozen: Optional[bool] = None
+    helius_price_info: Optional[Dict[str, Any]] = None
+    # Raw supply in base units for holder concentration denominator
+    _helius_raw_supply: Optional[int] = None
 
 
 @dataclass
@@ -198,12 +209,14 @@ class TokenAnalyzer:
         model_name: str = "gemini-2.5-flash",
         verbose: bool = False,
         log_callback: Optional[LogCallback] = None,
+        helius_client: Optional["HeliusClient"] = None,
     ) -> None:
         self.mcp_manager = mcp_manager
         self.model_name = model_name
         self.verbose = verbose
         self.log_callback = log_callback
         self.client = genai.Client(api_key=api_key)
+        self.helius_client = helius_client
 
     def _log(self, level: str, message: str, data: Optional[Dict[str, Any]] = None) -> None:
         """Log a message if verbose mode is enabled."""
@@ -283,19 +296,35 @@ class TokenAnalyzer:
         resolved_chain = token_data.chain
 
         if resolved_chain == "solana":
-            # Solana: run safety first (rugcheck populates safety_data with
-            # holder info), then holder fetch reads it — avoids unnecessary
-            # Solana RPC fallback calls.
+            # Helius DAS enrichment (optional, runs if API key is set)
+            try:
+                await self._fetch_helius_data(address, token_data)
+            except Exception as e:
+                self._log("error", f"Data collection task 'helius' failed: {type(e).__name__}")
+                token_data.errors.append(f"helius error: {type(e).__name__}")
+
+            # Safety check (rugcheck)
             try:
                 await self._fetch_safety_data(address, resolved_chain, token_data)
             except Exception as e:
                 self._log("error", f"Data collection task 'safety' failed: {e}")
                 token_data.errors.append(f"safety error: {e}")
+
+            # Holder data: try Helius first, fall back to existing method
+            helius_holders = False
             try:
-                await self._fetch_holder_data(address, resolved_chain, token_data)
+                helius_holders = await self._fetch_helius_holder_data(address, token_data)
             except Exception as e:
-                self._log("error", f"Data collection task 'holder' failed: {e}")
-                token_data.errors.append(f"holder error: {e}")
+                self._log("error", f"Data collection task 'helius_holders' failed: {type(e).__name__}")
+                token_data.errors.append(f"helius_holders error: {type(e).__name__}")
+
+            if not helius_holders:
+                try:
+                    await self._fetch_holder_data(address, resolved_chain, token_data)
+                except Exception as e:
+                    self._log("error", f"Data collection task 'holder' failed: {e}")
+                    token_data.errors.append(f"holder error: {e}")
+
             try:
                 await self._fetch_wash_trading_data(address, token_data)
             except Exception as e:
@@ -413,6 +442,83 @@ class TokenAnalyzer:
         except Exception as e:
             self._log("error", f"DexScreener fetch failed: {str(e)}")
             token_data.errors.append(f"DexScreener error: {str(e)}")
+
+    async def _fetch_helius_data(self, address: str, token_data: TokenData) -> None:
+        """Enrich token data using Helius DAS API (optional).
+
+        Raises on failure so the caller's try/except handles error logging.
+        """
+        if not self.helius_client:
+            return
+
+        self._log("tool", f"→ helius_getAsset({address})")
+        asset = await self.helius_client.get_asset(address)
+        self._log("tool", "✓ helius_getAsset")
+
+        if not asset:
+            self._log("info", "Helius DAS returned no data for asset")
+            return
+
+        # Enrich token data with DAS info
+        token_data.token_standard = asset.token_standard
+        token_data.metadata_uri = asset.metadata_uri
+        token_data.token_description = asset.description
+        token_data.is_mutable = asset.mutable
+        token_data.is_frozen = asset.frozen
+        token_data.helius_price_info = asset.price_info
+
+        # Store raw supply for holder concentration denominator
+        if asset.supply is not None:
+            token_data._helius_raw_supply = asset.supply
+
+        # Fill in name/symbol if not already set from DexScreener
+        if not token_data.name and asset.name:
+            token_data.name = asset.name
+        if not token_data.symbol and asset.symbol:
+            token_data.symbol = asset.symbol
+
+    async def _fetch_helius_holder_data(self, address: str, token_data: TokenData) -> bool:
+        """Fetch holder data using Helius DAS getTokenAccounts.
+
+        Uses token total supply (from DAS enrichment) as denominator for
+        accurate holder concentration percentages.
+        Returns True if holder data was successfully fetched, False otherwise.
+        """
+        if not self.helius_client:
+            return False
+
+        try:
+            self._log("tool", f"→ helius_getTokenAccounts({address})")
+            accounts = await self.helius_client.get_token_accounts(address, limit=100)
+            self._log("tool", "✓ helius_getTokenAccounts")
+
+            if not accounts:
+                return False
+
+            # Use actual total supply from DAS enrichment as denominator
+            total_supply = getattr(token_data, "_helius_raw_supply", None)
+            if not total_supply or total_supply <= 0:
+                self._log("info", "Helius holder data: no total supply available for concentration calc")
+                return False
+
+            # Build holder list with percentages against total supply
+            holders = []
+            for acc in accounts[:10]:
+                if isinstance(acc, dict):
+                    amount = float(acc.get("amount", 0))
+                    if amount > 0:
+                        pct = (amount / total_supply) * 100
+                        holders.append({"pct": pct})
+
+            if holders:
+                self._compute_holder_concentration(holders, token_data)
+                return True
+
+        except Exception as e:
+            self._log("error", f"Helius holder data fetch failed: {e}")
+            token_data.errors.append(f"Helius holder error: {type(e).__name__}")
+
+        return False
 
     async def _fetch_safety_data(
         self, address: str, chain: str, token_data: TokenData
@@ -706,6 +812,7 @@ class TokenAnalyzer:
             mcp_manager=self.mcp_manager,
             verbose=self.verbose,
             log_callback=self.log_callback,
+            helius_client=self.helius_client,
         )
 
         self._log("info", f"Running wash trading analysis on pool {pool_address}")
@@ -826,7 +933,19 @@ class TokenAnalyzer:
         # Token age
         if token_data.pair_created_at:
             lines.append(f"Pair Created: {token_data.pair_created_at}")
-        
+
+        # Helius DAS enrichment
+        if token_data.token_standard:
+            lines.append(f"Token Standard: {token_data.token_standard}")
+        if token_data.is_mutable is not None:
+            lines.append(f"Metadata Mutable: {'Yes' if token_data.is_mutable else 'No'}")
+        if token_data.is_frozen is not None:
+            lines.append(f"Token Frozen: {'Yes' if token_data.is_frozen else 'No'}")
+        if token_data.helius_price_info:
+            price_per_token = token_data.helius_price_info.get("price_per_token")
+            if price_per_token is not None:
+                lines.append(f"Helius Price: ${price_per_token}")
+
         # Holder concentration
         if token_data.top_10_holders_pct is not None:
             lines.append("")
@@ -928,6 +1047,8 @@ class TokenAnalyzer:
                 "risk_score": token_data.risk_score,
                 "risk_level": token_data.risk_level or "unknown",
                 "flags": token_data.safety_flags[:10],
+                "token_standard": token_data.token_standard,
+                "metadata_mutable": token_data.is_mutable,
             },
             holder_snapshot=holder_snapshot,
             wash_trading=wash_trading,
