@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.mcp_client import MCPManager
+    from app.helius_client import HeliusClient, HeliusEnhancedTransaction
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,12 @@ class WashTradingDetector:
         mcp_manager: "MCPManager",
         verbose: bool = False,
         log_callback: Optional[LogCallback] = None,
+        helius_client: Optional["HeliusClient"] = None,
     ) -> None:
         self.mcp_manager = mcp_manager
         self.verbose = verbose
         self.log_callback = log_callback
+        self.helius_client = helius_client
 
     def _log(
         self, level: str, message: str, data: Optional[Dict[str, Any]] = None
@@ -111,6 +114,26 @@ class WashTradingDetector:
         Returns:
             WashTradingResult with manipulation score and flags.
         """
+        # Try Helius Enhanced Transactions first (pre-parsed, more reliable)
+        helius_swaps = await self._fetch_enhanced_transactions(pool_address, token_address)
+
+        if helius_swaps is not None:
+            # Helius was available — use its results
+            if not helius_swaps:
+                return WashTradingResult(
+                    manipulation_level="unknown",
+                    flags=["No swap transactions found via Helius Enhanced API"],
+                )
+            if len(helius_swaps) < MIN_SAMPLE_SIZE:
+                return WashTradingResult(
+                    total_transactions_sampled=len(helius_swaps),
+                    unique_wallets=len(set(s.wallet for s in helius_swaps)),
+                    manipulation_level="unknown",
+                    flags=[f"Insufficient sample: {len(helius_swaps)} swaps (need {MIN_SAMPLE_SIZE})"],
+                )
+            return self._detect_patterns(helius_swaps, len(helius_swaps))
+
+        # Fallback: existing raw RPC approach
         client = self.mcp_manager.get_client("solana")
         if not client:
             self._log("info", "Solana RPC client not available for wash trading analysis")
@@ -119,7 +142,6 @@ class WashTradingDetector:
                 flags=["Solana RPC client not available"],
             )
 
-        # Fetch recent transaction signatures for the pool
         signatures = await self._fetch_pool_signatures(pool_address)
         if not signatures:
             self._log("info", f"No signatures found for pool {pool_address}")
@@ -128,7 +150,6 @@ class WashTradingDetector:
                 flags=[f"No transaction signatures found for pool {pool_address[:16]}..."],
             )
 
-        # Parse a sample of transactions
         sampled = signatures[:MAX_TX_SAMPLE]
         swaps, fetch_errors = await self._fetch_and_parse_transactions(
             sampled, token_address
@@ -184,6 +205,98 @@ class WashTradingDetector:
         except Exception as e:
             self._log("error", f"Failed to fetch pool signatures: {e}")
             return []
+
+    async def _fetch_enhanced_transactions(
+        self, pool_address: str, token_address: str
+    ) -> Optional[List[ParsedSwap]]:
+        """Fetch and parse transactions using Helius Enhanced Transactions API.
+
+        Returns None if Helius is not available (caller should fall back to raw RPC).
+        Returns empty list if Helius returned no useful swap data.
+        """
+        if not self.helius_client:
+            return None
+
+        try:
+            self._log("tool", f"→ helius_getTransactionHistory({pool_address})")
+            enhanced_txs = await self.helius_client.get_transaction_history(
+                pool_address, limit=MAX_SIGNATURES,
+            )
+            self._log("tool", f"✓ helius_getTransactionHistory ({len(enhanced_txs)} txs)")
+
+            if not enhanced_txs:
+                return []
+
+            swaps: List[ParsedSwap] = []
+            for tx in enhanced_txs[:MAX_TX_SAMPLE]:
+                swap = self._parse_enhanced_to_swap(tx, token_address)
+                if swap:
+                    swaps.append(swap)
+
+            self._log(
+                "info",
+                f"Helius enhanced parse: {len(swaps)}/{len(enhanced_txs)} swaps identified",
+            )
+            return swaps
+
+        except Exception as e:
+            self._log("error", f"Helius enhanced tx fetch failed: {e}")
+            return None
+
+    def _parse_enhanced_to_swap(
+        self, tx: "HeliusEnhancedTransaction", token_address: str
+    ) -> Optional[ParsedSwap]:
+        """Convert a Helius enhanced transaction to a ParsedSwap.
+
+        Helius pre-classifies transactions as SWAP, TRANSFER, etc. and
+        pre-extracts token transfers, making this much simpler than raw parsing.
+        """
+        from app.helius_client import HeliusEnhancedTransaction
+
+        # Only process SWAP transactions
+        if tx.type != "SWAP":
+            return None
+
+        if not tx.fee_payer:
+            return None
+
+        # Look for token transfers involving the target token
+        token_in = 0.0
+        token_out = 0.0
+
+        for transfer in tx.token_transfers:
+            if not isinstance(transfer, dict):
+                continue
+            mint = transfer.get("mint", "")
+            if mint != token_address:
+                continue
+
+            amount = transfer.get("tokenAmount", 0)
+            if not isinstance(amount, (int, float)):
+                try:
+                    amount = float(amount)
+                except (ValueError, TypeError):
+                    continue
+
+            from_account = transfer.get("fromUserAccount", "")
+            to_account = transfer.get("toUserAccount", "")
+
+            if to_account == tx.fee_payer:
+                token_in += amount
+            elif from_account == tx.fee_payer:
+                token_out += amount
+
+        net = token_in - token_out
+        if abs(net) < 1e-9:
+            return None
+
+        return ParsedSwap(
+            signature=tx.signature,
+            wallet=tx.fee_payer,
+            direction="buy" if net > 0 else "sell",
+            token_amount=abs(net),
+            block_time=tx.timestamp,
+        )
 
     async def _fetch_and_parse_transactions(
         self,

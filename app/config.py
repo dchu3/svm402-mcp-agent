@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         alias="SOLANA_RPC_URL",
     )
 
+    # Helius API key for DAS, Enhanced Transactions, and Priority Fee APIs.
+    # Required for Helius-specific features. Get one at https://helius.dev
+    helius_api_key: str = Field(default="", alias="HELIUS_API_KEY")
+
     # Internal API secret — shared between the MCP gateway and the FastAPI analysis
     # service.  Must be set to a strong random value in production.  When set, the
     # FastAPI /analyze endpoint rejects any request that does not carry the matching
