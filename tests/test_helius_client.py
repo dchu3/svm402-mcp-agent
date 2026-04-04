@@ -495,7 +495,7 @@ class TestGetTransactionHistory:
         assert params.get("before") == "old_sig"
 
     @pytest.mark.asyncio
-    async def test_returns_empty_list_on_http_error(self):
+    async def test_returns_none_on_http_error(self):
         client = _make_client()
         mock_resp = _mock_httpx_response([], status_code=500)
 
@@ -506,7 +506,7 @@ class TestGetTransactionHistory:
 
             results = await client.get_transaction_history("wallet123")
 
-        assert results == []
+        assert results is None
 
 
 class TestGetPriorityFeeEstimate:
@@ -637,7 +637,7 @@ class TestErrorHandling:
 
             results = await client.get_transaction_history("wallet123")
 
-        assert results == []
+        assert results is None
 
     @pytest.mark.asyncio
     async def test_rpc_error_in_response_body(self):

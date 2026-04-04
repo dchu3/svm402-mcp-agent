@@ -621,7 +621,6 @@ export function makeMcpServer(
           level: z.string(),
           micro_lamports_per_cu: z.number(),
         }),
-        _cached: z.boolean().optional(),
       },
     },
     async ({ account_keys }) => {
@@ -677,10 +676,11 @@ export function makeMcpServer(
             high: levels.high ?? null,
             very_high: levels.veryHigh ?? null,
           },
-          recommended: {
-            level: "medium",
-            micro_lamports_per_cu: levels.medium ?? levels.low ?? 1000,
-          },
+          recommended: (() => {
+            if (levels.medium != null) return { level: "medium", micro_lamports_per_cu: levels.medium };
+            if (levels.low != null) return { level: "low", micro_lamports_per_cu: levels.low };
+            return { level: "default", micro_lamports_per_cu: 1000 };
+          })(),
         };
 
         return {

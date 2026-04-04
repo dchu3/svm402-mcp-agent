@@ -220,8 +220,14 @@ class WashTradingDetector:
         try:
             self._log("tool", f"→ helius_getTransactionHistory({pool_address})")
             enhanced_txs = await self.helius_client.get_transaction_history(
-                pool_address, limit=MAX_SIGNATURES,
+                pool_address, limit=MAX_TX_SAMPLE,
             )
+
+            # None means API error — fall back to raw RPC
+            if enhanced_txs is None:
+                self._log("warning", "Helius get_transaction_history returned None (API error)")
+                return None
+
             self._log("tool", f"✓ helius_getTransactionHistory ({len(enhanced_txs)} txs)")
 
             if not enhanced_txs:
@@ -240,7 +246,7 @@ class WashTradingDetector:
             return swaps
 
         except Exception as e:
-            self._log("error", f"Helius enhanced tx fetch failed: {e}")
+            self._log("error", f"Helius enhanced tx fetch failed: {type(e).__name__}")
             return None
 
     def _parse_enhanced_to_swap(
@@ -250,9 +256,9 @@ class WashTradingDetector:
 
         Helius pre-classifies transactions as SWAP, TRANSFER, etc. and
         pre-extracts token transfers, making this much simpler than raw parsing.
+        Uses net token delta across all transfers (not just fee_payer direct
+        matches) to handle routed DEX swaps through intermediate accounts.
         """
-        from app.helius_client import HeliusEnhancedTransaction
-
         # Only process SWAP transactions
         if tx.type != "SWAP":
             return None
@@ -260,9 +266,12 @@ class WashTradingDetector:
         if not tx.fee_payer:
             return None
 
-        # Look for token transfers involving the target token
+        # Calculate net token movement for the fee_payer by looking at all
+        # transfers of the target token. Include both direct matches and
+        # infer from the overall flow when fee_payer isn't directly named.
         token_in = 0.0
         token_out = 0.0
+        has_target_token = False
 
         for transfer in tx.token_transfers:
             if not isinstance(transfer, dict):
@@ -271,6 +280,7 @@ class WashTradingDetector:
             if mint != token_address:
                 continue
 
+            has_target_token = True
             amount = transfer.get("tokenAmount", 0)
             if not isinstance(amount, (int, float)):
                 try:
@@ -285,6 +295,46 @@ class WashTradingDetector:
                 token_in += amount
             elif from_account == tx.fee_payer:
                 token_out += amount
+
+        # If fee_payer wasn't directly named in transfers but the tx involves
+        # the target token, infer direction from the overall token flow.
+        # In a swap, the fee_payer is the initiator — if the token had a net
+        # inflow to any user account, the fee_payer likely bought it.
+        if has_target_token and abs(token_in - token_out) < 1e-9:
+            total_in = 0.0
+            total_out = 0.0
+            for transfer in tx.token_transfers:
+                if not isinstance(transfer, dict):
+                    continue
+                if transfer.get("mint", "") != token_address:
+                    continue
+                amt = transfer.get("tokenAmount", 0)
+                if not isinstance(amt, (int, float)):
+                    try:
+                        amt = float(amt)
+                    except (ValueError, TypeError):
+                        continue
+                # Transfers TO user accounts = someone receiving the token
+                to_acc = transfer.get("toUserAccount", "")
+                from_acc = transfer.get("fromUserAccount", "")
+                if to_acc and not from_acc:
+                    total_in += amt
+                elif from_acc and not to_acc:
+                    total_out += amt
+                else:
+                    # Both present — use the flow direction
+                    total_in += amt  # count as movement
+
+            # Use the aggregated flow as the swap amount
+            if abs(total_in - total_out) > 1e-9:
+                net = total_in - total_out
+                return ParsedSwap(
+                    signature=tx.signature,
+                    wallet=tx.fee_payer,
+                    direction="buy" if net > 0 else "sell",
+                    token_amount=abs(net),
+                    block_time=tx.timestamp,
+                )
 
         net = token_in - token_out
         if abs(net) < 1e-9:

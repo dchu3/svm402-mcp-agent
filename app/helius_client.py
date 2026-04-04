@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -25,7 +26,7 @@ class HeliusAsset:
     name: Optional[str] = None
     symbol: Optional[str] = None
     token_standard: Optional[str] = None  # "Fungible", "NonFungible", "FungibleAsset", etc.
-    supply: Optional[float] = None
+    supply: Optional[int] = None
     decimals: Optional[int] = None
     metadata_uri: Optional[str] = None
     description: Optional[str] = None
@@ -76,14 +77,16 @@ class HeliusClient:
             raise ValueError("Helius API key is required")
         self._api_key = api_key
         self._timeout = timeout
-        self._rpc_url = f"{HELIUS_RPC_BASE}/?api-key={api_key}"
+        self._rpc_url = HELIUS_RPC_BASE
         self._api_url = f"{HELIUS_API_BASE}/v0"
         self._client: Optional[httpx.AsyncClient] = None
+        self._client_lock = asyncio.Lock()
 
     async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-        return self._client
+        async with self._client_lock:
+            if self._client is None or self._client.is_closed:
+                self._client = httpx.AsyncClient(timeout=self._timeout)
+            return self._client
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:
@@ -159,8 +162,10 @@ class HeliusClient:
             batch = signatures[i : i + 100]
             try:
                 client = await self._get_client()
-                url = f"{self._api_url}/transactions/?api-key={self._api_key}"
-                resp = await client.post(url, json={"transactions": batch})
+                url = f"{self._api_url}/transactions/"
+                resp = await client.post(
+                    url, json=batch, params={"api-key": self._api_key}
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, list):
@@ -170,9 +175,9 @@ class HeliusClient:
                             if parsed:
                                 all_txs.append(parsed)
             except httpx.HTTPStatusError as e:
-                logger.warning("Helius enhanced tx API error: %s", e)
+                logger.warning("Helius enhanced tx API error: HTTP %d", e.response.status_code)
             except Exception as e:
-                logger.warning("Helius enhanced tx request failed: %s", e)
+                logger.warning("Helius enhanced tx request failed: %s", type(e).__name__)
         return all_txs
 
     async def get_transaction_history(
@@ -181,10 +186,11 @@ class HeliusClient:
         *,
         before: Optional[str] = None,
         limit: int = 100,
-    ) -> List[HeliusEnhancedTransaction]:
+    ) -> Optional[List[HeliusEnhancedTransaction]]:
         """Get parsed transaction history for an address.
 
         Uses Helius enhanced transactions endpoint with address filter.
+        Returns None on error (caller should fall back to alternative).
         """
         try:
             client = await self._get_client()
@@ -204,11 +210,11 @@ class HeliusClient:
                             txs.append(parsed)
             return txs
         except httpx.HTTPStatusError as e:
-            logger.warning("Helius tx history API error: %s", e)
-            return []
+            logger.warning("Helius tx history API error: HTTP %d", e.response.status_code)
+            return None
         except Exception as e:
-            logger.warning("Helius tx history request failed: %s", e)
-            return []
+            logger.warning("Helius tx history request failed: %s", type(e).__name__)
+            return None
 
     # ── Priority Fee API ──
 
@@ -267,7 +273,10 @@ class HeliusClient:
                 "method": method,
                 "params": params,
             }
-            resp = await client.post(self._rpc_url, json=payload)
+            resp = await client.post(
+                self._rpc_url, json=payload,
+                params={"api-key": self._api_key},
+            )
             resp.raise_for_status()
             data = resp.json()
             if "error" in data:
@@ -275,10 +284,10 @@ class HeliusClient:
                 return None
             return data.get("result")
         except httpx.HTTPStatusError as e:
-            logger.warning("Helius RPC HTTP error for %s: %s", method, e)
+            logger.warning("Helius RPC HTTP error for %s: HTTP %d", method, e.response.status_code)
             return None
         except Exception as e:
-            logger.warning("Helius RPC request failed for %s: %s", method, e)
+            logger.warning("Helius RPC request failed for %s: %s", method, type(e).__name__)
             return None
 
     def _parse_asset(self, data: Dict[str, Any]) -> Optional[HeliusAsset]:
@@ -302,7 +311,7 @@ class HeliusClient:
             name=metadata.get("name"),
             symbol=metadata.get("symbol") or token_info.get("symbol"),
             token_standard=data.get("token_standard"),
-            supply=self._safe_float(token_info.get("supply")),
+            supply=self._safe_int(token_info.get("supply")),
             decimals=self._safe_int(token_info.get("decimals")),
             metadata_uri=content.get("json_uri"),
             description=metadata.get("description"),

@@ -73,6 +73,8 @@ class TokenData:
     is_mutable: Optional[bool] = None
     is_frozen: Optional[bool] = None
     helius_price_info: Optional[Dict[str, Any]] = None
+    # Raw supply in base units for holder concentration denominator
+    _helius_raw_supply: Optional[int] = None
 
 
 @dataclass
@@ -298,8 +300,8 @@ class TokenAnalyzer:
             try:
                 await self._fetch_helius_data(address, token_data)
             except Exception as e:
-                self._log("error", f"Data collection task 'helius' failed: {e}")
-                token_data.errors.append(f"helius error: {e}")
+                self._log("error", f"Data collection task 'helius' failed: {type(e).__name__}")
+                token_data.errors.append(f"helius error: {type(e).__name__}")
 
             # Safety check (rugcheck)
             try:
@@ -313,7 +315,8 @@ class TokenAnalyzer:
             try:
                 helius_holders = await self._fetch_helius_holder_data(address, token_data)
             except Exception as e:
-                self._log("error", f"Data collection task 'helius_holders' failed: {e}")
+                self._log("error", f"Data collection task 'helius_holders' failed: {type(e).__name__}")
+                token_data.errors.append(f"helius_holders error: {type(e).__name__}")
 
             if not helius_holders:
                 try:
@@ -441,41 +444,44 @@ class TokenAnalyzer:
             token_data.errors.append(f"DexScreener error: {str(e)}")
 
     async def _fetch_helius_data(self, address: str, token_data: TokenData) -> None:
-        """Enrich token data using Helius DAS API (optional)."""
+        """Enrich token data using Helius DAS API (optional).
+
+        Raises on failure so the caller's try/except handles error logging.
+        """
         if not self.helius_client:
             return
 
-        try:
-            from app.helius_client import HeliusClient
-            self._log("tool", f"→ helius_getAsset({address})")
-            asset = await self.helius_client.get_asset(address)
-            self._log("tool", "✓ helius_getAsset")
+        self._log("tool", f"→ helius_getAsset({address})")
+        asset = await self.helius_client.get_asset(address)
+        self._log("tool", "✓ helius_getAsset")
 
-            if not asset:
-                self._log("info", "Helius DAS returned no data for asset")
-                return
+        if not asset:
+            self._log("info", "Helius DAS returned no data for asset")
+            return
 
-            # Enrich token data with DAS info
-            token_data.token_standard = asset.token_standard
-            token_data.metadata_uri = asset.metadata_uri
-            token_data.token_description = asset.description
-            token_data.is_mutable = asset.mutable
-            token_data.is_frozen = asset.frozen
-            token_data.helius_price_info = asset.price_info
+        # Enrich token data with DAS info
+        token_data.token_standard = asset.token_standard
+        token_data.metadata_uri = asset.metadata_uri
+        token_data.token_description = asset.description
+        token_data.is_mutable = asset.mutable
+        token_data.is_frozen = asset.frozen
+        token_data.helius_price_info = asset.price_info
 
-            # Fill in name/symbol if not already set from DexScreener
-            if not token_data.name and asset.name:
-                token_data.name = asset.name
-            if not token_data.symbol and asset.symbol:
-                token_data.symbol = asset.symbol
+        # Store raw supply for holder concentration denominator
+        if asset.supply is not None:
+            token_data._helius_raw_supply = asset.supply
 
-        except Exception as e:
-            self._log("error", f"Helius DAS enrichment failed: {e}")
-            token_data.errors.append(f"Helius DAS error: {e}")
+        # Fill in name/symbol if not already set from DexScreener
+        if not token_data.name and asset.name:
+            token_data.name = asset.name
+        if not token_data.symbol and asset.symbol:
+            token_data.symbol = asset.symbol
 
     async def _fetch_helius_holder_data(self, address: str, token_data: TokenData) -> bool:
         """Fetch holder data using Helius DAS getTokenAccounts.
 
+        Uses token total supply (from DAS enrichment) as denominator for
+        accurate holder concentration percentages.
         Returns True if holder data was successfully fetched, False otherwise.
         """
         if not self.helius_client:
@@ -483,29 +489,25 @@ class TokenAnalyzer:
 
         try:
             self._log("tool", f"→ helius_getTokenAccounts({address})")
-            accounts = await self.helius_client.get_token_accounts(address, limit=20)
+            accounts = await self.helius_client.get_token_accounts(address, limit=100)
             self._log("tool", "✓ helius_getTokenAccounts")
 
             if not accounts:
                 return False
 
-            # Calculate holder concentration from token accounts
-            total_amount = sum(
-                float(acc.get("amount", 0))
-                for acc in accounts
-                if isinstance(acc, dict)
-            )
-
-            if total_amount <= 0:
+            # Use actual total supply from DAS enrichment as denominator
+            total_supply = getattr(token_data, "_helius_raw_supply", None)
+            if not total_supply or total_supply <= 0:
+                self._log("info", "Helius holder data: no total supply available for concentration calc")
                 return False
 
-            # Build holder list with percentages
+            # Build holder list with percentages against total supply
             holders = []
             for acc in accounts[:10]:
                 if isinstance(acc, dict):
                     amount = float(acc.get("amount", 0))
                     if amount > 0:
-                        pct = (amount / total_amount) * 100
+                        pct = (amount / total_supply) * 100
                         holders.append({"pct": pct})
 
             if holders:
@@ -514,6 +516,7 @@ class TokenAnalyzer:
 
         except Exception as e:
             self._log("error", f"Helius holder data fetch failed: {e}")
+            token_data.errors.append(f"Helius holder error: {type(e).__name__}")
 
         return False
 
