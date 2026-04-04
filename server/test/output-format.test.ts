@@ -42,6 +42,14 @@ const MOCK_ANALYSIS_RESPONSE = {
     top_10_holders_percent: 22.5,
     concentration_risk: "moderate",
   },
+  wash_trading: {
+    manipulation_score: 1,
+    manipulation_level: "clean",
+    unique_wallets: 42,
+    total_transactions_sampled: 100,
+    repeat_buyers: [],
+    flags: [],
+  },
   ai_analysis: {
     key_strengths: ["Strong community", "High liquidity"],
     key_risks: ["Meme token volatility"],
